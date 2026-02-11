@@ -2,6 +2,7 @@ import glob
 import json
 import math
 import os
+from pathlib import Path
 import random
 
 import numpy as np
@@ -15,24 +16,40 @@ from lcnn.config import M
 
 
 class WireframeDataset(Dataset):
-    def __init__(self, rootdir, split):
+    def __init__(self, rootdir, split, image_dir=None):
         self.rootdir = rootdir
-        filelist = glob.glob(f"{rootdir}/{split}/*_label.npz")
+        self.image_dir = Path(image_dir) if image_dir else None
+        filelist = list(Path(rootdir).joinpath(split).glob("*.npz"))
         filelist.sort()
 
         print(f"n{split}:", len(filelist))
         self.split = split
         self.filelist = filelist
 
+        # Store image normalization parameters from config
+        # This ensures they're available in multiprocessing workers
+        self.image_mean = np.array(M.image.mean)
+        self.image_stddev = np.array(M.image.stddev)
+        self.n_stc_posl = M.n_stc_posl
+        self.n_stc_negl = M.n_stc_negl
+        self.use_cood = M.use_cood
+        self.use_slop = M.use_slop
+
     def __len__(self):
         return len(self.filelist)
-
+    
+    def get_image_path(self, index):
+        if self.image_dir:
+            return self.image_dir / f"{self.filelist[index].stem}.png"
+        else:
+            return self.filelist[index].with_suffix(".png")
+        
     def __getitem__(self, idx):
-        iname = self.filelist[idx][:-10].replace("_a0", "").replace("_a1", "") + ".png"
+        # Determine image path
+        iname = self.get_image_path(idx)            
         image = io.imread(iname).astype(float)[:, :, :3]
-        if "a1" in self.filelist[idx]:
-            image = image[:, ::-1, :]
-        image = (image - M.image.mean) / M.image.stddev
+        
+        image = (image - self.image_mean) / self.image_stddev
         image = np.rollaxis(image, 2).copy()
 
         # npz["jmap"]: [J, H, W]    Junction heat map
@@ -51,8 +68,8 @@ class WireframeDataset(Dataset):
                 name: torch.from_numpy(npz[name]).float()
                 for name in ["jmap", "joff", "lmap"]
             }
-            lpos = np.random.permutation(npz["lpos"])[: M.n_stc_posl]
-            lneg = np.random.permutation(npz["lneg"])[: M.n_stc_negl]
+            lpos = np.random.permutation(npz["lpos"])[: self.n_stc_posl]
+            lneg = np.random.permutation(npz["lneg"])[: self.n_stc_negl]
             npos, nneg = len(lpos), len(lneg)
             lpre = np.concatenate([lpos, lneg], 0)
             for i in range(len(lpre)):
@@ -61,8 +78,8 @@ class WireframeDataset(Dataset):
             ldir = lpre[:, 0, :2] - lpre[:, 1, :2]
             ldir /= np.clip(LA.norm(ldir, axis=1, keepdims=True), 1e-6, None)
             feat = [
-                lpre[:, :, :2].reshape(-1, 4) / 128 * M.use_cood,
-                ldir * M.use_slop,
+                lpre[:, :, :2].reshape(-1, 4) / 128 * self.use_cood,
+                ldir * self.use_slop,
                 lpre[:, :, 2],
             ]
             feat = np.concatenate(feat, 1)

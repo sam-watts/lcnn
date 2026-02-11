@@ -81,6 +81,9 @@ def main():
         torch.backends.cudnn.deterministic = True
         torch.cuda.manual_seed(0)
         print("Let's use", torch.cuda.device_count(), "GPU(s)!")
+    elif torch.backends.mps.is_available():
+        device_name = "mps"
+        print("Let's use the Apple Silicon GPU!")
     else:
         print("CUDA is not available")
     device = torch.device(device_name)
@@ -98,13 +101,13 @@ def main():
         "pin_memory": True,
     }
     train_loader = torch.utils.data.DataLoader(
-        WireframeDataset(datadir, split="train"),
+        WireframeDataset(datadir, split="train", image_dir=C.io.image_dir),
         shuffle=True,
         batch_size=M.batch_size,
         **kwargs,
     )
     val_loader = torch.utils.data.DataLoader(
-        WireframeDataset(datadir, split="valid"),
+        WireframeDataset(datadir, split="valid", image_dir=C.io.image_dir),
         shuffle=False,
         batch_size=M.batch_size_eval,
         **kwargs,

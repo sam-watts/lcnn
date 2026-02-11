@@ -1,6 +1,7 @@
 io:
   logdir: logs/
-  datadir: data/wireframe/
+  datadir: /Users/swatts/repos/external/RoofMapNet/rid2_edges
+  image_dir: /Users/swatts/datasets/roof_information_dataset_2/images/
   resume_from:
   num_workers: 4
   tensorboard_port: 0

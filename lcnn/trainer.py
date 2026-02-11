@@ -2,8 +2,6 @@ import atexit
 import os
 import os.path as osp
 import shutil
-import signal
-import subprocess
 import threading
 import time
 from timeit import default_timer as timer
@@ -13,8 +11,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torch.nn.functional as F
+import wandb
 from skimage import io
-from tensorboardX import SummaryWriter
 
 from lcnn.config import C, M
 from lcnn.utils import recursive_to
@@ -37,7 +35,7 @@ class Trainer(object):
         if not osp.exists(self.out):
             os.makedirs(self.out)
 
-        self.run_tensorboard()
+        self.run_wandb()
         time.sleep(1)
 
         self.epoch = 0
@@ -51,20 +49,21 @@ class Trainer(object):
         self.avg_metrics = None
         self.metrics = np.zeros(0)
 
-    def run_tensorboard(self):
-        board_out = osp.join(self.out, "tensorboard")
-        if not osp.exists(board_out):
-            os.makedirs(board_out)
-        self.writer = SummaryWriter(board_out)
-        os.environ["CUDA_VISIBLE_DEVICES"] = ""
-        p = subprocess.Popen(
-            ["tensorboard", f"--logdir={board_out}", f"--port={C.io.tensorboard_port}"]
+    def run_wandb(self):
+        wandb_out = osp.join(self.out, "wandb")
+        if not osp.exists(wandb_out):
+            os.makedirs(wandb_out)
+        self.wandb_run = wandb.init(
+            project=os.environ.get("WANDB_PROJECT", "lcnn"),
+            dir=wandb_out,
+            reinit=True,
         )
 
-        def killme():
-            os.kill(p.pid, signal.SIGTERM)
+        def finish():
+            if wandb.run is not None:
+                wandb.finish()
 
-        atexit.register(killme)
+        atexit.register(finish)
 
     def _loss(self, result):
         losses = result["losses"]
@@ -203,11 +202,10 @@ class Trainer(object):
                 time = timer()
 
     def _write_metrics(self, size, total_loss, prefix, do_print=False):
+        log_data = {}
         for i, metrics in enumerate(self.metrics):
             for label, metric in zip(self.loss_labels, metrics):
-                self.writer.add_scalar(
-                    f"{prefix}/{i}/{label}", metric / size, self.iteration
-                )
+                log_data[f"{prefix}/{i}/{label}"] = metric / size
             if i == 0 and do_print:
                 csv_str = (
                     f"{self.epoch:03}/{self.iteration * self.batch_size:07},"
@@ -220,26 +218,43 @@ class Trainer(object):
                 with open(f"{self.out}/loss.csv", "a") as fout:
                     print(csv_str, file=fout)
                 pprint(prt_str, " " * 7)
-        self.writer.add_scalar(
-            f"{prefix}/total_loss", total_loss / size, self.iteration
-        )
+        log_data[f"{prefix}/total_loss"] = total_loss / size
+        if self.wandb_run is not None:
+            wandb.log(log_data, step=self.iteration)
         return total_loss
 
     def _plot_samples(self, i, index, result, meta, target, prefix):
-        fn = self.val_loader.dataset.filelist[index][:-10].replace("_a0", "") + ".png"
+        fn = self.val_loader.dataset.get_image_path(index)
         img = io.imread(fn)
-        imshow(img), plt.savefig(f"{prefix}_img.jpg"), plt.close()
+        img_path = f"{prefix}_img.jpg"
+        imshow(img)
+        plt.savefig(img_path)
+        plt.close()
 
         mask_result = result["jmap"][i].cpu().numpy()
         mask_target = target["jmap"][i].cpu().numpy()
+        mask_paths = []
         for ch, (ia, ib) in enumerate(zip(mask_target, mask_result)):
-            imshow(ia), plt.savefig(f"{prefix}_mask_{ch}a.jpg"), plt.close()
-            imshow(ib), plt.savefig(f"{prefix}_mask_{ch}b.jpg"), plt.close()
+            mask_a = f"{prefix}_mask_{ch}a.jpg"
+            mask_b = f"{prefix}_mask_{ch}b.jpg"
+            imshow(ia)
+            plt.savefig(mask_a)
+            plt.close()
+            imshow(ib)
+            plt.savefig(mask_b)
+            plt.close()
+            mask_paths.extend([mask_a, mask_b])
 
         line_result = result["lmap"][i].cpu().numpy()
         line_target = target["lmap"][i].cpu().numpy()
-        imshow(line_target), plt.savefig(f"{prefix}_line_a.jpg"), plt.close()
-        imshow(line_result), plt.savefig(f"{prefix}_line_b.jpg"), plt.close()
+        line_target_path = f"{prefix}_line_a.jpg"
+        line_result_path = f"{prefix}_line_b.jpg"
+        imshow(line_target)
+        plt.savefig(line_target_path)
+        plt.close()
+        imshow(line_result)
+        plt.savefig(line_result_path)
+        plt.close()
 
         def draw_vecl(lines, sline, juncs, junts, fn):
             imshow(img)
@@ -258,7 +273,8 @@ class Trainer(object):
                     if i > 0 and (i == junts[0]).all():
                         break
                     plt.scatter(j[1], j[0], c="blue", s=64, zorder=100)
-            plt.savefig(fn), plt.close()
+            plt.savefig(fn)
+            plt.close()
 
         junc = meta[i]["junc"].cpu().numpy() * 4
         jtyp = meta[i]["jtyp"].cpu().numpy()
@@ -275,8 +291,24 @@ class Trainer(object):
         score = result["score"][i].cpu().numpy()
         lpre = lpre[vecl_target == 1]
 
-        draw_vecl(lpre, np.ones(lpre.shape[0]), juncs, junts, f"{prefix}_vecl_a.jpg")
-        draw_vecl(vecl_result, score, rjuncs, rjunts, f"{prefix}_vecl_b.jpg")
+        vecl_target_path = f"{prefix}_vecl_a.jpg"
+        vecl_result_path = f"{prefix}_vecl_b.jpg"
+        draw_vecl(lpre, np.ones(lpre.shape[0]), juncs, junts, vecl_target_path)
+        draw_vecl(vecl_result, score, rjuncs, rjunts, vecl_result_path)
+
+        if self.wandb_run is not None:
+            base_key = f"validation/sample_{index:06d}"
+            log_data = {
+                f"{base_key}/image": wandb.Image(img_path),
+                f"{base_key}/line_target": wandb.Image(line_target_path),
+                f"{base_key}/line_result": wandb.Image(line_result_path),
+                f"{base_key}/vecl_target": wandb.Image(vecl_target_path),
+                f"{base_key}/vecl_result": wandb.Image(vecl_result_path),
+            }
+            for mask_path in mask_paths:
+                mask_key = mask_path.replace(prefix + "_", "")
+                log_data[f"{base_key}/{mask_key}"] = wandb.Image(mask_path)
+            wandb.log(log_data, step=self.iteration)
 
     def train(self):
         plt.rcParams["figure.figsize"] = (24, 24)
@@ -321,11 +353,3 @@ def pprint(*args):
     print(*args)
 
 
-def _launch_tensorboard(board_out, port, out):
-    os.environ["CUDA_VISIBLE_DEVICES"] = ""
-    p = subprocess.Popen(["tensorboard", f"--logdir={board_out}", f"--port={port}"])
-
-    def kill():
-        os.kill(p.pid, signal.SIGTERM)
-
-    atexit.register(kill)
