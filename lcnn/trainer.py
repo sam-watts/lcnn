@@ -55,8 +55,8 @@ class Trainer(object):
             os.makedirs(wandb_out)
         self.wandb_run = wandb.init(
             project=os.environ.get("WANDB_PROJECT", "lcnn"),
+            name=C.io.run_name,
             dir=wandb_out,
-            reinit=True,
         )
 
         def finish():
@@ -97,7 +97,7 @@ class Trainer(object):
                 total_loss += loss
         return total_loss
 
-    def validate(self):
+    def validate(self, extra_label=None):
         tprint("Running validation...", " " * 75)
         training = self.model.training
         self.model.eval()
@@ -128,11 +128,11 @@ class Trainer(object):
                         f"{npz}/{index:06}.npz",
                         **{k: v[i].cpu().numpy() for k, v in H.items()},
                     )
-                    if index >= 20:
+                    if index >= 5:
                         continue
                     self._plot_samples(i, index, H, meta, target, f"{viz}/{index:06}")
 
-        self._write_metrics(len(self.val_loader), total_loss, "validation", True)
+        self._write_metrics(len(self.val_loader), total_loss, f"validation{'' if extra_label is None else '-' + extra_label}", True)
         self.mean_loss = total_loss / len(self.val_loader)
 
         torch.save(

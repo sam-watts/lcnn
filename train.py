@@ -10,7 +10,6 @@ Arguments:
 Options:
    -h --help                       Show this screen.
    -d --devices <devices>          Comma seperated GPU devices [default: 0]
-   -i --identifier <identifier>    Folder identifier [default: default-identifier]
 """
 
 import datetime
@@ -94,20 +93,19 @@ def main():
     # wireframe.datasets.WireframeDataset(datadir, split="train")[0]
     # sys.exit(0)
 
-    datadir = C.io.datadir
     kwargs = {
         "collate_fn": collate,
         "num_workers": C.io.num_workers if os.name != "nt" else 0,
         "pin_memory": True,
     }
     train_loader = torch.utils.data.DataLoader(
-        WireframeDataset(datadir, split="train", image_dir=C.io.image_dir),
+        WireframeDataset(split="train", data_sources=M.data_sources),
         shuffle=True,
         batch_size=M.batch_size,
         **kwargs,
     )
     val_loader = torch.utils.data.DataLoader(
-        WireframeDataset(datadir, split="valid", image_dir=C.io.image_dir),
+        WireframeDataset(split="val", data_sources=M.data_sources),
         shuffle=False,
         batch_size=M.batch_size_eval,
         **kwargs,
@@ -158,7 +156,7 @@ def main():
 
     if resume_from:
         optim.load_state_dict(checkpoint["optim_state_dict"])
-    outdir = resume_from or get_outdir(args["--identifier"])
+    outdir = resume_from or C.io.run_name
     print("outdir:", outdir)
 
     try:
@@ -182,6 +180,16 @@ def main():
         if len(glob.glob(f"{outdir}/viz/*")) <= 1:
             shutil.rmtree(outdir)
         raise
+
+    # validate on gfrid only at end of training
+    trainer.val_loader = torch.utils.data.DataLoader(
+        WireframeDataset(split="val", data_sources=["gfrid"]),
+        shuffle=False,
+        batch_size=M.batch_size_eval,
+        **kwargs,
+    )
+
+    trainer.validate(extra_label="gfrid-only")
 
 
 if __name__ == "__main__":
