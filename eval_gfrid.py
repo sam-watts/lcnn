@@ -1,26 +1,13 @@
 #!/usr/bin/env python3
-"""Evaluate a trained L-CNN model on gfrid and log metrics to the original wandb run.
-
-Usage:
-    eval_gfrid.py <log-dir> [options]
-    eval_gfrid.py (-h | --help)
-
-Arguments:
-    <log-dir>       Path to the logs directory (e.g. logs/260211-221828-5d4d784-rid2_gfrid)
-
-Options:
-    -h --help                       Show this screen.
-    -d --devices <devices>          Comma separated GPU devices [default: 0]
-    --checkpoint <name>             Checkpoint file to load [default: checkpoint_best.pth]
-"""
+"""Evaluate a trained L-CNN model on one or more val datasets and log metrics to the original wandb run."""
 
 import os
 import os.path as osp
 from pathlib import Path
 
+import click
 import numpy as np
 import torch
-from docopt import docopt
 
 import lcnn
 from lcnn.config import C, M
@@ -31,79 +18,18 @@ from lcnn.models.multitask_learner import MultitaskHead, MultitaskLearner
 from lcnn.utils import recursive_to
 
 
-def main():
-    args = docopt(__doc__)
-    log_dir = args["<log-dir>"]
-    checkpoint_name = args["--checkpoint"]
+def evaluate_dataset(model, dataset_name, device, checkpoint_name):
+    """Evaluate the model on a single validation dataset.
 
-    # Load config from the run's saved config
-    config_file = osp.join(log_dir, "config.yaml")
-    if not osp.exists(config_file):
-        raise FileNotFoundError(f"Config not found: {config_file}")
-    C.update(C.from_yaml(filename=config_file))
-    M.update(C.model)
-
-    run_name = C.io.run_name
-    wandb_dir = Path(log_dir) / "wandb/wandb"
-
-    run_dirs = sorted(
-        wandb_dir.glob("run-*"),
-        key=lambda p: p.stat().st_mtime,
-        reverse=True
-    )
-
-    latest_run = run_dirs[0]
-    run_id = latest_run.name.split("-")[-1]
-    print(f"Run name: {run_name}")
-    print(f"Log dir: {log_dir}")
-    print(f"Wandb dir: {wandb_dir}")
-    print(f"Run ID: {run_id}")
-
-    # Device setup
-    device_name = "cpu"
-    os.environ["CUDA_VISIBLE_DEVICES"] = args["--devices"]
-    if torch.cuda.is_available():
-        device_name = "cuda"
-        torch.backends.cudnn.deterministic = True
-        print("Using CUDA")
-    elif torch.backends.mps.is_available():
-        device_name = "mps"
-        print("Using MPS")
-    else:
-        print("Using CPU")
-    device = torch.device(device_name)
-
-    # Load model
-    checkpoint_path = osp.join(log_dir, checkpoint_name)
-    if not osp.exists(checkpoint_path):
-        raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
-    print(f"Loading checkpoint: {checkpoint_path}")
-    checkpoint = torch.load(checkpoint_path, map_location=device)
-
-    if M.backbone == "stacked_hourglass":
-        model = lcnn.models.hg(
-            depth=M.depth,
-            head=MultitaskHead,
-            num_stacks=M.num_stacks,
-            num_blocks=M.num_blocks,
-            num_classes=sum(sum(M.head_size, [])),
-        )
-    else:
-        raise NotImplementedError
-
-    model = MultitaskLearner(model)
-    model = LineVectorizer(model)
-    model.load_state_dict(checkpoint["model_state_dict"])
-    model = model.to(device)
-    model.eval()
-
-    # Load gfrid validation dataset
+    Returns a dict of metric names to values, e.g.
+      {"eval-gfrid-checkpoint_best.pth/sAP5": 42.1, ...}
+    """
     kwargs = {
         "collate_fn": collate,
         "num_workers": C.io.num_workers if os.name != "nt" else 0,
         "pin_memory": True,
     }
-    val_dataset = WireframeDataset(split="val", data_sources=["gfrid"])
+    val_dataset = WireframeDataset(split="val", data_sources=[dataset_name])
     val_loader = torch.utils.data.DataLoader(
         val_dataset,
         shuffle=False,
@@ -111,10 +37,9 @@ def main():
         **kwargs,
     )
 
-    # Run inference once and store per-sample predictions + GT
-    print(f"Evaluating on {len(val_dataset)} gfrid validation samples...")
+    print(f"\nEvaluating on {len(val_dataset)} {dataset_name} validation samples...")
 
-    per_sample = []  # list of dicts with pred_lines, pred_score, gt_lines, gt_junc
+    per_sample = []
     all_junc_pred = np.zeros((0, 3))
     all_junc_pred_offset = np.zeros((0, 3))
     all_junc_gt = []
@@ -134,18 +59,15 @@ def main():
 
             batch_size = H["jmap"].shape[0]
             for i in range(batch_size):
-                # Extract predicted lines and scores
                 pred_lines = H["lines"][i].cpu().numpy()[:, :, :2]
                 pred_score = H["score"][i].cpu().numpy()
 
-                # Trim padding (repeated first line indicates end of valid predictions)
                 for j in range(len(pred_lines)):
                     if j > 0 and (pred_lines[j] == pred_lines[0]).all():
                         pred_lines = pred_lines[:j]
                         pred_score = pred_score[:j]
                         break
 
-                # Load GT from dataset labels
                 label_path = val_dataset.filelist[sample_idx]["label"]
                 with np.load(label_path) as npz:
                     gt_lines = npz["lpos"][:, :, :2]
@@ -159,7 +81,6 @@ def main():
                     }
                 )
 
-                # Junction predictions via heatmap post-processing
                 jmap = H["jmap"][i].cpu().numpy()
                 joff = H["joff"][i].cpu().numpy()
                 jun_c = post_jheatmap(jmap[0])
@@ -202,19 +123,85 @@ def main():
         else:
             sap_results[threshold] = 0.0
 
-    # Compute mAPJ
-    # junc_distances = [0.5, 1.0, 2.0]
-    # all_junc_ids = all_junc_ids.astype(np.int64)
-    # mapj = mAPJ(all_junc_pred, all_junc_gt, junc_distances, all_junc_ids)
-    # mapj_offset = mAPJ(all_junc_pred_offset, all_junc_gt, junc_distances, all_junc_ids)
-
     # Print results
-    print("\n=== gfrid Evaluation Results ===")
+    print(f"\n=== {dataset_name} Evaluation Results ===")
     print(f"  sAP5:  {sap_results[5]:.1f}")
     print(f"  sAP10: {sap_results[10]:.1f}")
     print(f"  sAP15: {sap_results[15]:.1f}")
-    # print(f"  mAPJ:          {mapj:.1f}")
-    # print(f"  mAPJ (offset): {mapj_offset:.1f}")
+
+    prefix = f"eval-{dataset_name}-{checkpoint_name}"
+    return {
+        f"{prefix}/sAP5": sap_results[5],
+        f"{prefix}/sAP10": sap_results[10],
+        f"{prefix}/sAP15": sap_results[15],
+    }
+
+
+def process_log_dir(log_dir, checkpoint_name, val_datasets_arg, device):
+    """Load config/model for a single log dir, evaluate, and log to wandb."""
+    print(f"\n{'=' * 60}")
+    print(f"Processing: {log_dir}")
+    print(f"{'=' * 60}")
+
+    # Load config from the run's saved config
+    config_file = osp.join(log_dir, "config.yaml")
+    if not osp.exists(config_file):
+        raise FileNotFoundError(f"Config not found: {config_file}")
+    C.update(C.from_yaml(filename=config_file))
+    M.update(C.model)
+
+    # Determine which datasets to evaluate
+    if val_datasets_arg:
+        val_datasets = [s.strip() for s in val_datasets_arg.split(",")]
+    else:
+        val_datasets = list(M.data_sources)
+    print(f"Val datasets: {val_datasets}")
+
+    run_name = C.io.run_name
+    wandb_dir = Path(log_dir) / "wandb/wandb"
+
+    run_dirs = sorted(
+        wandb_dir.glob("run-*"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True
+    )
+
+    latest_run = run_dirs[0]
+    run_id = latest_run.name.split("-")[-1]
+    print(f"Run name: {run_name}")
+    print(f"Log dir: {log_dir}")
+    print(f"Wandb dir: {wandb_dir}")
+    print(f"Run ID: {run_id}")
+
+    # Load model
+    checkpoint_path = osp.join(log_dir, checkpoint_name)
+    if not osp.exists(checkpoint_path):
+        raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
+    print(f"Loading checkpoint: {checkpoint_path}")
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+
+    if M.backbone == "stacked_hourglass":
+        model = lcnn.models.hg(
+            depth=M.depth,
+            head=MultitaskHead,
+            num_stacks=M.num_stacks,
+            num_blocks=M.num_blocks,
+            num_classes=sum(sum(M.head_size, [])),
+        )
+    else:
+        raise NotImplementedError
+
+    model = MultitaskLearner(model)
+    model = LineVectorizer(model)
+    model.load_state_dict(checkpoint["model_state_dict"])
+    model = model.to(device)
+    model.eval()
+
+    # Evaluate each dataset and collect all metrics
+    all_eval_metrics = {}
+    for dataset_name in val_datasets:
+        metrics = evaluate_dataset(model, dataset_name, device, checkpoint_name)
+        all_eval_metrics.update(metrics)
 
     # Log to wandb, resuming the original run
     import wandb
@@ -229,21 +216,54 @@ def main():
         resume="must",
         dir=wandb_out,
     )
-    eval_metrics = {
-        f"eval-gfrid-{checkpoint_name}/sAP5": sap_results[5],
-        f"eval-gfrid-{checkpoint_name}/sAP10": sap_results[10],
-        f"eval-gfrid-{checkpoint_name}/sAP15": sap_results[15],
-        # f"eval-gfrid-{checkpoint_name}/mAPJ": mapj,
-        # f"eval-gfrid-{checkpoint_name}/mAPJ_offset": mapj_offset,
-    }
 
     # Log as summary metrics so they appear in the wandb runs table
-    for key, value in eval_metrics.items():
+    for key, value in all_eval_metrics.items():
         wandb_run.summary[key] = value
 
     wandb.finish()
-    print("\nLogged metrics to wandb run:", run_name)
-    print("Done.")
+    print(f"\nLogged metrics to wandb run: {run_name}")
+
+    # Free GPU memory before next log dir
+    del model, checkpoint
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
+
+
+@click.command()
+@click.argument("log_dirs", nargs=-1, required=True, type=click.Path(exists=True))
+@click.option("-d", "--devices", default="0", help="Comma separated GPU devices.")
+@click.option("--checkpoint", default="checkpoint_best.pth", help="Checkpoint file to load.")
+@click.option(
+    "--val-datasets",
+    default=None,
+    help="Comma separated val dataset names (e.g. gfrid,rid2,roofmapnet). "
+         "Defaults to all data_sources in the run config.",
+)
+def main(log_dirs, devices, checkpoint, val_datasets):
+    """Evaluate a trained L-CNN model on one or more val datasets and log metrics
+    to the original wandb run.
+
+    LOG_DIRS: One or more paths to log directories (e.g. logs/run-a logs/run-b).
+    """
+    # Device setup
+    device_name = "cpu"
+    os.environ["CUDA_VISIBLE_DEVICES"] = devices
+    if torch.cuda.is_available():
+        device_name = "cuda"
+        torch.backends.cudnn.deterministic = True
+        print("Using CUDA")
+    elif torch.backends.mps.is_available():
+        device_name = "mps"
+        print("Using MPS")
+    else:
+        print("Using CPU")
+    device = torch.device(device_name)
+
+    for log_dir in log_dirs:
+        process_log_dir(log_dir, checkpoint, val_datasets, device)
+
+    print("\nAll done.")
 
 
 if __name__ == "__main__":
