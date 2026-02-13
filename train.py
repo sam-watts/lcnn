@@ -46,11 +46,9 @@ def git_hash():
     return ret
 
 
-def get_outdir(identifier):
+def get_outdir():
     # load config
-    name = str(datetime.datetime.now().strftime("%y%m%d-%H%M%S"))
-    name += "-%s" % git_hash()
-    name += "-%s" % identifier
+    name = f"{C.io.run_name}-{str(datetime.datetime.now().strftime('%y%m%d-%H%M%S'))}"
     outdir = osp.join(osp.expanduser(C.io.logdir), name)
     if not osp.exists(outdir):
         os.makedirs(outdir)
@@ -156,7 +154,7 @@ def main():
 
     if resume_from:
         optim.load_state_dict(checkpoint["optim_state_dict"])
-    outdir = resume_from or C.io.run_name
+    outdir = resume_from or get_outdir(M.run_name)
     print("outdir:", outdir)
 
     try:
