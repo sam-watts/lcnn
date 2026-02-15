@@ -1,18 +1,18 @@
 io:
   logdir: logs/
-  datadir: /Users/swatts/repos/external/RoofMapNet/rid2_edges
-  image_dir: /Users/swatts/datasets/roof_information_dataset_2/images/
   resume_from:
   num_workers: 4
   tensorboard_port: 0
   validation_interval: 24000
+  run_name: rid2_gfrid_roofmapnet_flips
 
 model:
+  data_sources: [rid2, gfrid, roofmapnet]
   image:
       mean: [109.730, 103.832, 98.681]
       stddev: [22.275, 22.124, 23.229]
 
-  batch_size: 6
+  batch_size: 8
   batch_size_eval: 2
 
   # backbone multi-task parameters
@@ -60,6 +60,11 @@ model:
 
   # junction threashold for evaluation (See #5)
   eval_junc_thres: 0.008
+
+  augmentation:
+    flip_prob: 0.5
+    rotate_prob: 0
+    rotate_max_angle: 90
 
 optim:
   name: Adam
