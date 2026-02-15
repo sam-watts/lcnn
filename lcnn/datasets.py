@@ -21,6 +21,11 @@ DATA_SOURCES = {
         "image_dir": "/home/swatts/datasets/gfrid/images/",
         "images_split": True
     },
+    "gfrid_roof_centered": {
+        "label_dir": "/home/swatts/RoofMapNet/processed/gfrid_roof_centered/",
+        "image_dir": "/home/swatts/datasets/gfrid/roof_centered/edge_centerlines/images/",
+        "images_split": True
+    },
     "rid2": {
         "label_dir": "/home/swatts/RoofMapNet/processed/rid2",
         "image_dir": "/home/swatts/datasets/roof_information_dataset_2/images/",
@@ -55,6 +60,31 @@ def _clip_segment(y0, x0, y1, x1, lo, hi):
         if t0 > t1:
             return None
     return (y0 + t0 * dy, x0 + t0 * dx, y0 + t1 * dy, x0 + t1 * dx)
+
+
+def _deduplicate_lines(lpos, Lpos):
+    """Remove duplicate lines from lpos and Lpos.
+
+    Lines are considered duplicates if they share the same pair of junction
+    indices (in either order).  Both the coordinate array (lpos) and the
+    index array (Lpos) are filtered identically.
+
+    Args:
+        lpos: [M, 2, 3] line endpoint coordinates (y, x, type).
+        Lpos: [M, 2]    junction index pairs.
+
+    Returns:
+        (lpos_unique, Lpos_unique) with duplicates removed.
+    """
+    if len(Lpos) == 0:
+        return lpos, Lpos
+
+    # Canonical key: sorted junction-index pair
+    canonical = np.sort(Lpos, axis=1)
+    _, unique_idx = np.unique(canonical, axis=0, return_index=True)
+    unique_idx = np.sort(unique_idx)  # preserve original order
+
+    return lpos[unique_idx], Lpos[unique_idx]
 
 
 class WireframeDataset(Dataset):
@@ -306,6 +336,11 @@ class WireframeDataset(Dataset):
         with np.load(self.filelist[idx]["label"]) as npz:
             npz_data = {name: npz[name].copy() for name in
                         ["jmap", "joff", "lmap", "junc", "lpos", "lneg", "Lpos", "Lneg"]}
+
+        # Deduplicate positive lines (preprocessing may produce duplicates)
+        npz_data["lpos"], npz_data["Lpos"] = _deduplicate_lines(
+            npz_data["lpos"], npz_data["Lpos"]
+        )
 
         # Apply augmentations (no-op for val/test)
         image, npz_data = self._augment(image, npz_data)
