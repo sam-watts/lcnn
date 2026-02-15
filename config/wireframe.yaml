@@ -3,7 +3,7 @@ io:
   resume_from:
   num_workers: 4
   tensorboard_port: 0
-  validation_interval: 24000
+  validation_interval: 2544
   run_name: gfrid_roof_centered_more_epochs
 
 model:
@@ -33,7 +33,7 @@ model:
   # sampler parameters
   ## static sampler
   n_stc_posl: 300
-  n_stc_negl: 40
+  n_stc_negl: 80
 
   ## dynamic sampler
   n_dyn_junc: 300
@@ -50,8 +50,8 @@ model:
   dim_fc: 1024
 
   # maximum junction and line outputs
-  n_out_junc: 250
-  n_out_line: 2500
+  n_out_junc: 150
+  n_out_line: 1000
 
   # additional ablation study parameters
   use_cood: 0
