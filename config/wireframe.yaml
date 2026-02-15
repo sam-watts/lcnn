@@ -18,11 +18,11 @@ model:
   # backbone multi-task parameters
   head_size: [[2], [1], [2]]
   loss_weight:
-    jmap: 8.0
+    jmap: 4.0
     lmap: 0.5
     joff: 0.25
-    lpos: 1
-    lneg: 1
+    lpos: 2
+    lneg: 1.5
 
   # backbone parameters
   backbone: stacked_hourglass

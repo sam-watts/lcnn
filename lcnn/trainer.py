@@ -44,6 +44,7 @@ class Trainer(object):
         self.lr_decay_epoch = C.optim.lr_decay_epoch
         self.num_stacks = C.model.num_stacks
         self.mean_loss = self.best_mean_loss = 1e1000
+        self.best_verification_loss = 1e1000
 
         self.loss_labels = None
         self.avg_metrics = None
@@ -135,6 +136,20 @@ class Trainer(object):
         self._write_metrics(len(self.val_loader), total_loss, f"validation{'' if extra_label is None else '-' + extra_label}", True)
         self.mean_loss = total_loss / len(self.val_loader)
 
+        # Compute verification loss (lpos + lneg) for checkpointing.
+        # These are the losses most directly correlated with SAP metrics,
+        # and are less noisy than the total loss (which is dominated by jmap).
+        verification_loss = 0
+        for name in ["lpos", "lneg"]:
+            if name in self.loss_labels:
+                j = self.loss_labels.index(name)
+                verification_loss += self.metrics[0, j] / len(self.val_loader)
+        if self.wandb_run is not None:
+            wandb.log(
+                {"validation/verification_loss": verification_loss},
+                step=self.iteration,
+            )
+
         torch.save(
             {
                 "iteration": self.iteration,
@@ -142,6 +157,7 @@ class Trainer(object):
                 "optim_state_dict": self.optim.state_dict(),
                 "model_state_dict": self.model.state_dict(),
                 "best_mean_loss": self.best_mean_loss,
+                "best_verification_loss": self.best_verification_loss,
             },
             osp.join(self.out, "checkpoint_latest.pth"),
         )
@@ -149,8 +165,8 @@ class Trainer(object):
             osp.join(self.out, "checkpoint_latest.pth"),
             osp.join(npz, "checkpoint.pth"),
         )
-        if self.mean_loss < self.best_mean_loss:
-            self.best_mean_loss = self.mean_loss
+        if verification_loss < self.best_verification_loss:
+            self.best_verification_loss = verification_loss
             shutil.copy(
                 osp.join(self.out, "checkpoint_latest.pth"),
                 osp.join(self.out, "checkpoint_best.pth"),

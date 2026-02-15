@@ -172,6 +172,8 @@ def main():
                 print("WARNING: iteration is not a multiple of epoch_size, reset it")
                 trainer.iteration -= trainer.iteration % epoch_size
             trainer.best_mean_loss = checkpoint["best_mean_loss"]
+            if "best_verification_loss" in checkpoint:
+                trainer.best_verification_loss = checkpoint["best_verification_loss"]
             del checkpoint
         trainer.train()
     except BaseException:
