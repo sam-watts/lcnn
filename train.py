@@ -53,6 +53,8 @@ def create_scheduler(optimizer, config, last_epoch=-1):
     Supports:
       - "cosine_warmup": linear warmup for `warmup_epochs`, then cosine decay
         to `min_lr` over the remaining epochs.
+      - "plateau": ReduceLROnPlateau -- adapts LR based on validation loss.
+        Good when optimal training length is unknown.  Pair with early stopping.
       - "step": original L-CNN behaviour -- divide LR by 10 at `lr_decay_epoch`.
     """
     scheduler_name = config.optim.get("scheduler", "step")
@@ -76,6 +78,17 @@ def create_scheduler(optimizer, config, last_epoch=-1):
 
         return torch.optim.lr_scheduler.LambdaLR(
             optimizer, lr_lambda, last_epoch=last_epoch
+        )
+
+    elif scheduler_name == "plateau":
+        # ReduceLROnPlateau -- no last_epoch; state is restored via
+        # load_state_dict when resuming (see main()).
+        return torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer,
+            mode="min",
+            factor=config.optim.get("plateau_factor", 0.5),
+            patience=config.optim.get("plateau_patience", 5),
+            min_lr=config.optim.get("min_lr", 1e-6),
         )
 
     elif scheduler_name == "step":
@@ -213,6 +226,10 @@ def main():
     if resume_from:
         resume_epoch = checkpoint["iteration"] // epoch_size
         scheduler = create_scheduler(optim, C, last_epoch=resume_epoch - 1)
+        # Restore scheduler internal state (essential for ReduceLROnPlateau
+        # which cannot reconstruct its state from last_epoch alone).
+        if scheduler is not None and "scheduler_state_dict" in checkpoint:
+            scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
         print(f"Resumed scheduler at epoch {resume_epoch}, "
               f"lr = {optim.param_groups[0]['lr']:.2e}")
     else:

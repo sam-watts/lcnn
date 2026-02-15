@@ -4,10 +4,10 @@ io:
   num_workers: 4
   tensorboard_port: 0
   validation_interval: 2544
-  run_name: gfrid_roof_centered_more_epochs
+  run_name: gfrid_roofmapnet_rid2_v2
 
 model:
-  data_sources: [gfrid_roof_centered]
+  data_sources: [gfrid, roofmapnet, rid2]
   image:
       mean: [109.730, 103.832, 98.681]
       stddev: [22.275, 22.124, 23.229]
@@ -74,10 +74,16 @@ optim:
   max_epoch: 120
   lr_decay_epoch: 10
 
-  # LR scheduler: "cosine_warmup" or "step" (original behavior)
+  # LR scheduler: "cosine_warmup", "plateau", or "step" (original behavior)
+  #   cosine_warmup -- linear warmup then cosine decay (needs max_epoch tuned)
+  #   plateau       -- ReduceLROnPlateau, adapts to val loss (good for exploration)
+  #   step          -- single step decay at lr_decay_epoch
   scheduler: cosine_warmup
   warmup_epochs: 5
   min_lr: 1.0e-6
+  # plateau-specific (used only when scheduler: plateau)
+  # plateau_factor: 0.5
+  # plateau_patience: 5
 
   # Early stopping: stop if val loss hasn't improved for this many epochs.
   # Set to 0 to disable.

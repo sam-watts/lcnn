@@ -483,7 +483,13 @@ class Trainer(object):
                 pprint(f"Training stopped early at epoch {self.epoch}")
                 break
             if self.scheduler is not None:
-                self.scheduler.step()
+                if isinstance(
+                    self.scheduler,
+                    torch.optim.lr_scheduler.ReduceLROnPlateau,
+                ):
+                    self.scheduler.step(self.mean_loss)
+                else:
+                    self.scheduler.step()
 
 
 cmap = plt.get_cmap("jet")
