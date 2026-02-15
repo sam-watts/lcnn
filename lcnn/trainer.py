@@ -15,12 +15,13 @@ import wandb
 from skimage import io
 
 from lcnn.config import C, M
+from lcnn.metric import msTPFP, ap
 from lcnn.utils import recursive_to
 
 
 class Trainer(object):
     def __init__(self, device, model, optimizer, train_loader, val_loader, out,
-                 scheduler=None):
+                 scheduler=None, extra_val_loaders=None):
         self.device = device
 
         self.model = model
@@ -29,6 +30,7 @@ class Trainer(object):
 
         self.train_loader = train_loader
         self.val_loader = val_loader
+        self.extra_val_loaders = extra_val_loaders or {}
         self.batch_size = C.model.batch_size
 
         self.validation_interval = C.io.validation_interval
@@ -47,6 +49,10 @@ class Trainer(object):
         self.num_stacks = C.model.num_stacks
         self.mean_loss = self.best_mean_loss = 1e1000
         self.best_verification_loss = 1e1000
+
+        self.early_stopping_patience = C.optim.get("early_stopping_patience", 0)
+        self._best_loss_epoch = 0
+        self._stop_training = False
 
         self.loss_labels = None
         self.avg_metrics = None
@@ -112,6 +118,7 @@ class Trainer(object):
 
         total_loss = 0
         self.metrics[...] = 0
+        per_sample = []
         with torch.no_grad():
             for batch_idx, (image, meta, target) in enumerate(self.val_loader):
                 input_dict = {
@@ -131,11 +138,21 @@ class Trainer(object):
                         f"{npz}/{index:06}.npz",
                         **{k: v[i].cpu().numpy() for k, v in H.items()},
                     )
+                    per_sample.append(
+                        self._collect_sample_preds(
+                            H, i, self.val_loader.dataset, index
+                        )
+                    )
                     if index >= 5:
                         continue
                     self._plot_samples(i, index, H, meta, target, f"{viz}/{index:06}")
 
-        self._write_metrics(len(self.val_loader), total_loss, f"validation{'' if extra_label is None else '-' + extra_label}", True)
+        label = f"validation{'' if extra_label is None else '-' + extra_label}"
+        self._write_metrics(len(self.val_loader), total_loss, label, True)
+
+        sap = self._compute_sap(per_sample)
+        self._log_sap(sap, label)
+
         self.mean_loss = total_loss / len(self.val_loader)
 
         # Compute verification loss (lpos + lneg) for checkpointing.
@@ -174,8 +191,121 @@ class Trainer(object):
                 osp.join(self.out, "checkpoint_best.pth"),
             )
 
+        # Early stopping check
+        if (self.early_stopping_patience > 0
+                and self.epoch - self._best_loss_epoch >= self.early_stopping_patience):
+            epochs_since = self.epoch - self._best_loss_epoch
+            pprint(
+                f"Early stopping: no val loss improvement for "
+                f"{epochs_since} epochs (best at epoch {self._best_loss_epoch})"
+            )
+            self._stop_training = True
+            if self.wandb_run is not None:
+                wandb.log({"early_stopped_epoch": self.epoch}, step=self.iteration)
+
+        # Run extra validations (e.g. always validate on gfrid_roof_centered)
+        for name, loader in self.extra_val_loaders.items():
+            self._validate_extra(loader, name)
+
         if training:
             self.model.train()
+
+    def _collect_sample_preds(self, H, i, dataset, index):
+        """Extract predicted/GT lines for a single sample for sAP computation."""
+        pred_lines = H["lines"][i].cpu().numpy()[:, :, :2]
+        pred_score = H["score"][i].cpu().numpy()
+
+        # Trim padded/duplicate lines (model pads by wrapping to first line)
+        for j in range(len(pred_lines)):
+            if j > 0 and (pred_lines[j] == pred_lines[0]).all():
+                pred_lines = pred_lines[:j]
+                pred_score = pred_score[:j]
+                break
+
+        with np.load(dataset.filelist[index]["label"]) as npz_file:
+            gt_lines = npz_file["lpos"][:, :, :2]
+
+        return {
+            "pred_lines": pred_lines,
+            "pred_score": pred_score,
+            "gt_lines": gt_lines,
+        }
+
+    def _compute_sap(self, per_sample):
+        """Compute sAP at thresholds 5, 10, 15 from collected predictions."""
+        n_gt = sum(len(s["gt_lines"]) for s in per_sample)
+        if n_gt == 0:
+            return {5: 0.0, 10: 0.0, 15: 0.0}
+
+        results = {}
+        for threshold in [5, 10, 15]:
+            all_tp, all_fp, all_scores = [], [], []
+            for s in per_sample:
+                if len(s["pred_lines"]) > 0 and len(s["gt_lines"]) > 0:
+                    tp, fp = msTPFP(s["pred_lines"], s["gt_lines"], threshold)
+                    all_tp.append(tp)
+                    all_fp.append(fp)
+                    all_scores.append(s["pred_score"])
+
+            if all_tp:
+                tp_cat = np.concatenate(all_tp)
+                fp_cat = np.concatenate(all_fp)
+                scores_cat = np.concatenate(all_scores)
+                idx = np.argsort(-scores_cat)
+                tp_cum = np.cumsum(tp_cat[idx]) / n_gt
+                fp_cum = np.cumsum(fp_cat[idx]) / n_gt
+                results[threshold] = 100 * ap(tp_cum, fp_cum)
+            else:
+                results[threshold] = 0.0
+        return results
+
+    def _log_sap(self, sap, prefix):
+        """Print and log sAP metrics to wandb."""
+        pprint(
+            f"  {prefix} sAP5: {sap[5]:.1f}  "
+            f"sAP10: {sap[10]:.1f}  sAP15: {sap[15]:.1f}"
+        )
+        if self.wandb_run is not None:
+            wandb.log(
+                {
+                    f"{prefix}/sAP5": sap[5],
+                    f"{prefix}/sAP10": sap[10],
+                    f"{prefix}/sAP15": sap[15],
+                },
+                step=self.iteration,
+            )
+
+    def _validate_extra(self, loader, label):
+        """Run validation on an additional dataset (no checkpoint save)."""
+        tprint(f"Running extra validation ({label})...", " " * 75)
+
+        total_loss = 0
+        self.metrics[...] = 0
+        per_sample = []
+
+        with torch.no_grad():
+            for batch_idx, (image, meta, target) in enumerate(loader):
+                input_dict = {
+                    "image": recursive_to(image, self.device),
+                    "meta": recursive_to(meta, self.device),
+                    "target": recursive_to(target, self.device),
+                    "mode": "validation",
+                }
+                result = self.model(input_dict)
+                total_loss += self._loss(result)
+
+                H = result["preds"]
+                for i in range(H["jmap"].shape[0]):
+                    index = batch_idx * M.batch_size_eval + i
+                    per_sample.append(
+                        self._collect_sample_preds(H, i, loader.dataset, index)
+                    )
+
+        prefix = f"validation-{label}"
+        self._write_metrics(len(loader), total_loss, prefix, True)
+
+        sap = self._compute_sap(per_sample)
+        self._log_sap(sap, prefix)
 
     def train_epoch(self):
         self.model.train()
@@ -218,6 +348,8 @@ class Trainer(object):
             if num_images % self.validation_interval == 0 or num_images == 600:
                 self.validate()
                 time = timer()
+                if self._stop_training:
+                    return
 
     def _write_metrics(self, size, total_loss, prefix, do_print=False):
         log_data = {}
@@ -338,6 +470,8 @@ class Trainer(object):
         #     self.validate()
         epoch_size = len(self.train_loader)
         start_epoch = self.iteration // epoch_size
+        # Reset patience counter so resumed runs get a fresh window
+        self._best_loss_epoch = start_epoch
         for self.epoch in range(start_epoch, self.max_epoch):
             current_lr = self.optim.param_groups[0]["lr"]
             if self.scheduler is not None:
@@ -345,6 +479,9 @@ class Trainer(object):
             elif self.epoch == self.lr_decay_epoch:
                 self.optim.param_groups[0]["lr"] /= 10
             self.train_epoch()
+            if self._stop_training:
+                pprint(f"Training stopped early at epoch {self.epoch}")
+                break
             if self.scheduler is not None:
                 self.scheduler.step()
 
