@@ -105,6 +105,75 @@ def create_scheduler(optimizer, config, last_epoch=-1):
         return None
 
 
+def _build_sampler(dataset, model_cfg):
+    """Build a WeightedRandomSampler for balanced dataset training.
+
+    Supports several strategies via model_cfg.sampling_strategy:
+      - "uniform"  : no sampler (plain shuffle) -- default
+      - "balanced" : every dataset equally likely per sample
+      - "sqrt"     : P(dataset_i) ∝ √count_i -- moderate upweighting of small
+                     datasets (halfway between uniform and balanced on log scale)
+      - list[float]: multiplicative factors on the natural (count-proportional)
+                     rate, e.g. [3.0, 1.0, 1.0] samples the first dataset at
+                     3× its natural frequency.
+
+    Implementation note: the per-sample weight loop below divides each
+    dataset_weight by the dataset's sample count, so a sample in dataset i
+    is drawn with probability ∝ dataset_weights[i] / count_i.  The total
+    draw probability for dataset i is therefore ∝ dataset_weights[i].
+    So dataset_weights must represent the *desired dataset-level sampling
+    probabilities* (before normalisation).
+    """
+    strategy = getattr(model_cfg, "sampling_strategy", "uniform")
+    if strategy == "uniform":
+        return None
+
+    source_indices = np.array(dataset.source_indices)
+    n_sources = len(dataset.source_names)
+    counts = np.array([dataset.source_counts[s] for s in dataset.source_names])
+
+    if strategy == "balanced":
+        # Equal probability for every dataset
+        dataset_weights = np.ones(n_sources) / n_sources
+    elif strategy == "sqrt":
+        # P(dataset_i) ∝ √count_i -- between uniform (∝ count) and balanced (equal)
+        sqrt_counts = np.sqrt(counts)
+        dataset_weights = sqrt_counts / sqrt_counts.sum()
+    elif isinstance(strategy, (list, tuple)):
+        if len(strategy) != n_sources:
+            raise ValueError(
+                f"sampling_strategy list has {len(strategy)} entries "
+                f"but there are {n_sources} data_sources"
+            )
+        # Multiplicative factors on natural (count-proportional) rate
+        factors = np.array(strategy, dtype=float)
+        dataset_weights = factors * counts
+        dataset_weights /= dataset_weights.sum()
+    else:
+        raise ValueError(f"Unknown sampling_strategy: {strategy}")
+
+    # Assign per-sample weight based on its dataset
+    per_sample_weight = np.zeros(len(dataset))
+    for i, dw in enumerate(dataset_weights):
+        mask = source_indices == i
+        n = mask.sum()
+        if n > 0:
+            per_sample_weight[mask] = dw / n
+
+    # Print effective epoch composition
+    probs = per_sample_weight / per_sample_weight.sum()
+    print(f"Sampling strategy: {strategy}")
+    for i, name in enumerate(dataset.source_names):
+        source_prob = probs[source_indices == i].sum() * 100
+        print(f"  {name}: {counts[i]} samples, ~{source_prob:.1f}% of each epoch")
+
+    return torch.utils.data.WeightedRandomSampler(
+        weights=per_sample_weight,
+        num_samples=len(dataset),
+        replacement=True,
+    )
+
+
 def get_outdir():
     # load config
     name = f"{C.io.run_name}-{str(datetime.datetime.now().strftime('%y%m%d-%H%M%S'))}"
@@ -155,9 +224,12 @@ def main():
         "num_workers": C.io.num_workers if os.name != "nt" else 0,
         "pin_memory": True,
     }
+    train_dataset = WireframeDataset(split="train", data_sources=M.data_sources)
+    sampler = _build_sampler(train_dataset, M)
     train_loader = torch.utils.data.DataLoader(
-        WireframeDataset(split="train", data_sources=M.data_sources),
-        shuffle=True,
+        train_dataset,
+        shuffle=(sampler is None),
+        sampler=sampler,
         batch_size=M.batch_size,
         **kwargs,
     )

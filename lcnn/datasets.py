@@ -90,7 +90,11 @@ def _deduplicate_lines(lpos, Lpos):
 class WireframeDataset(Dataset):
     def __init__(self, split, data_sources):
         self.filelist = []
-        for source in data_sources:
+        self.source_indices = []  # per-sample dataset index (for balanced sampling)
+        self.source_names = list(data_sources)
+        self.source_counts = {}  # {source_name: count}
+
+        for source_idx, source in enumerate(data_sources):
             if source not in DATA_SOURCES:
                 raise ValueError(f"Unknown data source: {source}")
 
@@ -102,6 +106,7 @@ class WireframeDataset(Dataset):
             source_files = list(label_dir.joinpath(split).glob("*.npz"))
             source_files.sort()
 
+            count = 0
             for lpath in source_files:
                 if image_dir:
                     if images_split:
@@ -115,8 +120,13 @@ class WireframeDataset(Dataset):
                     "label": lpath,
                     "image": ipath
                 })
+                self.source_indices.append(source_idx)
+                count += 1
 
-        print(f"n{split}:", len(self.filelist))
+            self.source_counts[source] = count
+
+        print(f"n{split}:", len(self.filelist),
+              " | ".join(f"{k}: {v}" for k, v in self.source_counts.items()))
         self.split = split
 
         # Store image normalization parameters from config

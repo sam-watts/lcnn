@@ -8,6 +8,11 @@ io:
 
 model:
   data_sources: [gfrid, roofmapnet, rid2]
+  # Per-dataset sampling weights for balanced training.
+  # "uniform" = flat concatenation (default), "balanced" = equal per-dataset,
+  # "sqrt" = sqrt-proportional (moderate upweighting of small datasets),
+  # or a list of explicit weights matching data_sources order, e.g. [3.0, 1.0, 1.0]
+  sampling_strategy: [3.0, 1.0, 1.0]  # boost gfrid, keep roofmapnet/rid2 proportional
   image:
       mean: [117.490, 119.090, 114.480]
       stddev: [56.780, 52.650, 53.820]
