@@ -84,6 +84,13 @@ class TestDrawGaussian:
         # Should not have drawn anything meaningful
         assert heatmap.sum() == pytest.approx(0.0, abs=1e-6)
 
+    def test_very_small_sigma(self):
+        """Very small sigma (radius=0) should still draw a single pixel."""
+        heatmap = np.zeros((128, 128), dtype=np.float32)
+        draw_gaussian(heatmap, (64, 64), sigma=0.1)
+        assert heatmap[64, 64] == pytest.approx(1.0)
+        assert (heatmap > 0).sum() == 1
+
 
 class TestGenerateGaussianJmap:
     def test_single_junction(self):

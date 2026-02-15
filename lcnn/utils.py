@@ -51,7 +51,7 @@ def draw_gaussian(heatmap, center, sigma):
     left = min(col, radius)
     right = min(width - col - 1, radius)
 
-    if top + bottom <= 0 or left + right <= 0:
+    if top + bottom < 0 or left + right < 0:
         return heatmap
 
     masked_heatmap = heatmap[
