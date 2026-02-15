@@ -8,6 +8,84 @@ import torch
 import matplotlib.pyplot as plt
 
 
+def gaussian_2d(shape, sigma=1.0):
+    """Generate a 2D Gaussian kernel.
+
+    Args:
+        shape: (height, width) of the kernel. Should be odd numbers.
+        sigma: Standard deviation of the Gaussian.
+
+    Returns:
+        np.ndarray of shape (height, width) with values in [0, 1].
+    """
+    m, n = [(ss - 1.0) / 2.0 for ss in shape]
+    y, x = np.ogrid[-m : m + 1, -n : n + 1]
+    h = np.exp(-(x * x + y * y) / (2 * sigma * sigma))
+    h[h < np.finfo(h.dtype).eps * h.max()] = 0
+    return h
+
+
+def draw_gaussian(heatmap, center, sigma):
+    """Draw a 2D Gaussian on the heatmap at the given center using element-wise max.
+
+    This follows the CenterNet/CornerNet approach where overlapping Gaussians
+    are combined via max rather than sum, preventing saturation.
+
+    Args:
+        heatmap: 2D numpy array to draw on (modified in-place).
+        center: (row, col) center of the Gaussian (integer pixel coordinates).
+        sigma: Standard deviation of the Gaussian.
+
+    Returns:
+        The modified heatmap (same reference as input).
+    """
+    radius = int(3 * sigma + 0.5)  # 3-sigma covers ~99.7% of the distribution
+    diameter = 2 * radius + 1
+    gaussian = gaussian_2d((diameter, diameter), sigma=sigma)
+
+    row, col = int(center[0]), int(center[1])
+    height, width = heatmap.shape[0:2]
+
+    top = min(row, radius)
+    bottom = min(height - row - 1, radius)
+    left = min(col, radius)
+    right = min(width - col - 1, radius)
+
+    if top + bottom <= 0 or left + right <= 0:
+        return heatmap
+
+    masked_heatmap = heatmap[
+        row - top : row + bottom + 1, col - left : col + right + 1
+    ]
+    masked_gaussian = gaussian[
+        radius - top : radius + bottom + 1, radius - left : radius + right + 1
+    ]
+
+    if min(masked_gaussian.shape) > 0 and min(masked_heatmap.shape) > 0:
+        np.maximum(masked_heatmap, masked_gaussian, out=masked_heatmap)
+
+    return heatmap
+
+
+def generate_gaussian_jmap(jmap_shape, junctions, sigma=1.0):
+    """Generate a junction heatmap with Gaussian distributions.
+
+    Args:
+        jmap_shape: (H, W) shape of the heatmap.
+        junctions: List of (row, col) junction coordinates (can be sub-pixel).
+        sigma: Standard deviation of the Gaussian.
+
+    Returns:
+        np.ndarray of shape (H, W) with Gaussian heatmap values in [0, 1].
+    """
+    heatmap = np.zeros(jmap_shape, dtype=np.float32)
+    for junc in junctions:
+        row, col = int(junc[0]), int(junc[1])
+        if 0 <= row < jmap_shape[0] and 0 <= col < jmap_shape[1]:
+            draw_gaussian(heatmap, (row, col), sigma)
+    return heatmap
+
+
 class benchmark(object):
     def __init__(self, msg, enable=True, fmt="%0.3g"):
         self.msg = msg
