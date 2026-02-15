@@ -67,7 +67,7 @@ def create_scheduler(optimizer, config, last_epoch=-1):
         def lr_lambda(epoch):
             if epoch < warmup_epochs:
                 # Linear warmup from min_lr to base_lr
-                return min_lr_ratio + (1 - min_lr_ratio) * epoch / max(1, warmup_epochs)
+                return min_lr_ratio + (1 - min_lr_ratio) * epoch / max(1, warmup_epochs - 1)
             # Cosine annealing from base_lr to min_lr
             progress = (epoch - warmup_epochs) / max(1, max_epochs - warmup_epochs)
             return min_lr_ratio + (1 - min_lr_ratio) * 0.5 * (
@@ -155,8 +155,16 @@ def main():
         **kwargs,
     )
     epoch_size = len(train_loader)
-    # print("epoch_size (train):", epoch_size)
-    # print("epoch_size (valid):", len(val_loader))
+
+    # Always validate on gfrid_roof_centered in addition to the main dataset
+    extra_val_loaders = {}
+    if set(M.data_sources) != {"gfrid_roof_centered"}:
+        extra_val_loaders["gfrid_roof_centered"] = torch.utils.data.DataLoader(
+            WireframeDataset(split="val", data_sources=["gfrid_roof_centered"]),
+            shuffle=False,
+            batch_size=M.batch_size_eval,
+            **kwargs,
+        )
 
     if resume_from:
         checkpoint = torch.load(osp.join(resume_from, "checkpoint_latest.pth"))
@@ -223,6 +231,7 @@ def main():
             val_loader=val_loader,
             out=outdir,
             scheduler=scheduler,
+            extra_val_loaders=extra_val_loaders,
         )
         if resume_from:
             trainer.iteration = checkpoint["iteration"]
