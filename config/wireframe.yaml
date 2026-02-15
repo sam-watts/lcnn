@@ -3,7 +3,7 @@ io:
   resume_from:
   num_workers: 4
   tensorboard_port: 0
-  validation_interval: 2  # validate every N epochs
+  validation_interval: 1  # validate every N epochs
   run_name: gfrid_roofmapnet_rid2_v3
 
 model:
