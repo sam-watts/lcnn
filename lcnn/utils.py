@@ -141,6 +141,14 @@ def apply_gaussian_heatmap(jmap, joff=None, sigma=1.0):
             g = gaussian_2d((H, W), (cy, cx), sigma=sigma)
             gaussian_jmap[t] = np.maximum(gaussian_jmap[t], g)
 
+            # Snap the nearest pixel to 1.0 to ensure at least one pixel
+            # per junction is a definite positive. This is important for
+            # focal loss which uses a threshold to identify positive pixels.
+            snap_y = int(round(cy))
+            snap_x = int(round(cx))
+            if 0 <= snap_y < H and 0 <= snap_x < W:
+                gaussian_jmap[t, snap_y, snap_x] = 1.0
+
     return gaussian_jmap
 
 

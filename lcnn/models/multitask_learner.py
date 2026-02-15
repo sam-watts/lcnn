@@ -54,6 +54,11 @@ class MultitaskLearner(nn.Module):
 
         offset = self.head_off
         loss_weight = M.loss_weight
+        # Determine junction heatmap loss function once (not per-stack)
+        use_focal_loss = (
+            getattr(M, "jmap_loss", "cross_entropy") == "focal"
+            and getattr(M, "jmap_gaussian_sigma", 0) > 0
+        )
         losses = []
         for stack, output in enumerate(outputs):
             output = output.transpose(0, 1).reshape([-1, batch, row, col]).contiguous()
@@ -70,8 +75,7 @@ class MultitaskLearner(nn.Module):
                     return result
 
             L = OrderedDict()
-            jmap_loss_fn = getattr(M, "jmap_loss", "cross_entropy")
-            if jmap_loss_fn == "focal" and getattr(M, "jmap_gaussian_sigma", 0) > 0:
+            if use_focal_loss:
                 L["jmap"] = sum(
                     gaussian_focal_loss(jmap[i], T["jmap"][i]) for i in range(n_jtyp)
                 )
@@ -105,7 +109,7 @@ def cross_entropy_loss(logits, positive):
     return (positive * nlogp[1] + (1 - positive) * nlogp[0]).mean(2).mean(1)
 
 
-def gaussian_focal_loss(logits, target, alpha=2.0, beta=4.0):
+def gaussian_focal_loss(logits, target, alpha=2.0, beta=4.0, pos_thresh=0.99):
     """Focal loss for Gaussian heatmap regression (CenterNet-style).
 
     This is the penalty-reduced pixel-wise logistic regression with focal
@@ -113,12 +117,17 @@ def gaussian_focal_loss(logits, target, alpha=2.0, beta=4.0):
     "CornerNet" (Law & Deng, 2018). It is specifically designed for
     Gaussian heatmap targets where:
 
-    - Pixels at object centers have target = 1.0
+    - Pixels at object centers have target = 1.0 (or near 1.0 with sub-pixel offsets)
     - Pixels near centers have 0 < target < 1.0 (from the Gaussian)
     - Background pixels have target = 0.0
 
     The loss reduces penalties for pixels near (but not exactly on) the
     center, controlled by the beta parameter.
+
+    Note: A threshold (pos_thresh) is used instead of exact equality to
+    identify positive pixels. This is necessary because when Gaussians
+    are centered at sub-pixel positions, no pixel may have a target value
+    of exactly 1.0.
 
     Args:
         logits: Predicted logits of shape [2, batch, H, W] (2 classes).
@@ -126,6 +135,9 @@ def gaussian_focal_loss(logits, target, alpha=2.0, beta=4.0):
                 with values in [0, 1].
         alpha: Focal loss exponent for hard example mining (default: 2.0).
         beta: Exponent for penalty reduction near Gaussian centers (default: 4.0).
+        pos_thresh: Threshold for considering a pixel as a positive (junction
+                    center). Pixels with target >= pos_thresh are treated as
+                    positives. Default: 0.99.
 
     Returns:
         Per-sample loss tensor of shape [batch].
@@ -134,9 +146,11 @@ def gaussian_focal_loss(logits, target, alpha=2.0, beta=4.0):
     pred = F.softmax(logits, dim=0)[1]  # [batch, H, W]
     pred = pred.clamp(min=1e-6, max=1 - 1e-6)
 
-    # Separate positive (center) and negative (non-center) pixels
-    pos_mask = target.eq(1).float()
-    neg_mask = target.lt(1).float()
+    # Separate positive (center) and negative (non-center) pixels.
+    # Use a threshold instead of exact equality to handle sub-pixel
+    # Gaussian centers where no pixel has target == 1.0 exactly.
+    pos_mask = target.ge(pos_thresh).float()
+    neg_mask = target.lt(pos_thresh).float()
 
     # Positive loss: -(1 - p)^alpha * log(p) at junction centers
     pos_loss = -torch.pow(1 - pred, alpha) * torch.log(pred) * pos_mask

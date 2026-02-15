@@ -69,7 +69,8 @@ class TestGaussian2D:
         """Gaussian should work with floating-point center positions."""
         heatmap = gaussian_2d((128, 128), (64.3, 32.7), sigma=2.0)
         assert heatmap.max() > 0.0
-        # The peak should be near (64, 33) since 32.7 rounds to 33
+        # Peak is at the sub-pixel center, so nearby integer pixels
+        # should have high but not necessarily 1.0 values
         assert heatmap.max() == pytest.approx(1.0, abs=0.05)
 
     def test_sigma_affects_spread(self):
@@ -153,6 +154,36 @@ class TestApplyGaussianHeatmap:
         result = apply_gaussian_heatmap(jmap, sigma=2.0)
         assert result.min() >= 0.0
         assert result.max() <= 1.0
+
+    def test_snap_to_one_with_offset(self):
+        """With sub-pixel offsets, nearest pixel should be snapped to 1.0.
+
+        This is important for focal loss which requires at least one pixel
+        per junction to have target >= threshold for proper normalization.
+        """
+        jmap = np.zeros((1, 128, 128), dtype=np.float32)
+        jmap[0, 64, 64] = 1.0
+        joff = np.zeros((1, 2, 128, 128), dtype=np.float32)
+        joff[0, 0, 64, 64] = 0.3  # dy: center at 64.8
+        joff[0, 1, 64, 64] = 0.4  # dx: center at 64.9
+        result = apply_gaussian_heatmap(jmap, joff=joff, sigma=1.5)
+        # The nearest pixel to (64.8, 64.9) is (65, 65), which should be snapped to 1.0
+        assert result[0, 65, 65] == pytest.approx(1.0, abs=1e-6)
+
+    def test_snap_ensures_positive_exists(self):
+        """Every junction should have at least one pixel at exactly 1.0."""
+        jmap = np.zeros((1, 128, 128), dtype=np.float32)
+        jmap[0, 30, 40] = 1.0
+        jmap[0, 80, 90] = 1.0
+        joff = np.zeros((1, 2, 128, 128), dtype=np.float32)
+        # Large offsets
+        joff[0, 0, 30, 40] = -0.4
+        joff[0, 1, 30, 40] = 0.3
+        joff[0, 0, 80, 90] = 0.2
+        joff[0, 1, 80, 90] = -0.3
+        result = apply_gaussian_heatmap(jmap, joff=joff, sigma=1.5)
+        # At least 2 pixels should have value == 1.0 (one per junction)
+        assert (result[0] >= 0.999).sum() >= 2
 
 
 class TestApplyGaussianHeatmapTorch:
@@ -250,3 +281,24 @@ class TestGaussianFocalLoss:
         logits = torch.randn(2, batch_size, 128, 128)
         loss = gaussian_focal_loss(logits, target)
         assert loss.shape == (batch_size,)
+
+    def test_pos_thresh_with_subpixel(self):
+        """Focal loss should handle near-1.0 targets with pos_thresh.
+
+        When Gaussians have sub-pixel centers, the peak pixel may not
+        be exactly 1.0. The pos_thresh parameter should still identify
+        these as positives.
+        """
+        from lcnn.models.multitask_learner import gaussian_focal_loss
+
+        # Target with near-1.0 value (simulating sub-pixel Gaussian)
+        target = torch.zeros(1, 128, 128)
+        target[0, 64, 64] = 0.995  # Near but not exactly 1.0
+
+        logits = torch.randn(2, 1, 128, 128)
+        loss = gaussian_focal_loss(logits, target, pos_thresh=0.99)
+        assert loss.shape == (1,)
+        assert (loss >= 0).all()
+        # With default pos_thresh=0.99, 0.995 should be counted as positive
+        # This should produce a reasonable loss value (not NaN or inf)
+        assert torch.isfinite(loss).all()
