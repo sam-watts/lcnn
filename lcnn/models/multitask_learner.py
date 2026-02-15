@@ -70,9 +70,15 @@ class MultitaskLearner(nn.Module):
                     return result
 
             L = OrderedDict()
-            L["jmap"] = sum(
-                cross_entropy_loss(jmap[i], T["jmap"][i]) for i in range(n_jtyp)
-            )
+            jmap_loss_fn = getattr(M, "jmap_loss", "cross_entropy")
+            if jmap_loss_fn == "focal" and getattr(M, "jmap_gaussian_sigma", 0) > 0:
+                L["jmap"] = sum(
+                    gaussian_focal_loss(jmap[i], T["jmap"][i]) for i in range(n_jtyp)
+                )
+            else:
+                L["jmap"] = sum(
+                    cross_entropy_loss(jmap[i], T["jmap"][i]) for i in range(n_jtyp)
+                )
             L["lmap"] = (
                 F.binary_cross_entropy_with_logits(lmap, T["lmap"], reduction="none")
                 .mean(2)
@@ -97,6 +103,58 @@ def l2loss(input, target):
 def cross_entropy_loss(logits, positive):
     nlogp = -F.log_softmax(logits, dim=0)
     return (positive * nlogp[1] + (1 - positive) * nlogp[0]).mean(2).mean(1)
+
+
+def gaussian_focal_loss(logits, target, alpha=2.0, beta=4.0):
+    """Focal loss for Gaussian heatmap regression (CenterNet-style).
+
+    This is the penalty-reduced pixel-wise logistic regression with focal
+    loss, as described in "Objects as Points" (Zhou et al., 2019) and
+    "CornerNet" (Law & Deng, 2018). It is specifically designed for
+    Gaussian heatmap targets where:
+
+    - Pixels at object centers have target = 1.0
+    - Pixels near centers have 0 < target < 1.0 (from the Gaussian)
+    - Background pixels have target = 0.0
+
+    The loss reduces penalties for pixels near (but not exactly on) the
+    center, controlled by the beta parameter.
+
+    Args:
+        logits: Predicted logits of shape [2, batch, H, W] (2 classes).
+        target: Ground truth Gaussian heatmap of shape [batch, H, W],
+                with values in [0, 1].
+        alpha: Focal loss exponent for hard example mining (default: 2.0).
+        beta: Exponent for penalty reduction near Gaussian centers (default: 4.0).
+
+    Returns:
+        Per-sample loss tensor of shape [batch].
+    """
+    # Get predicted probability for the positive (junction) class
+    pred = F.softmax(logits, dim=0)[1]  # [batch, H, W]
+    pred = pred.clamp(min=1e-6, max=1 - 1e-6)
+
+    # Separate positive (center) and negative (non-center) pixels
+    pos_mask = target.eq(1).float()
+    neg_mask = target.lt(1).float()
+
+    # Positive loss: -(1 - p)^alpha * log(p) at junction centers
+    pos_loss = -torch.pow(1 - pred, alpha) * torch.log(pred) * pos_mask
+
+    # Negative loss: -(1 - Y)^beta * p^alpha * log(1 - p) elsewhere
+    # The (1 - Y)^beta term reduces penalty for pixels near the Gaussian center
+    neg_loss = (
+        -torch.pow(1 - target, beta)
+        * torch.pow(pred, alpha)
+        * torch.log(1 - pred)
+        * neg_mask
+    )
+
+    loss = pos_loss + neg_loss
+
+    # Normalize by the number of positive pixels (junction centers)
+    num_pos = pos_mask.sum(dim=(1, 2)).clamp(min=1)
+    return loss.sum(dim=(1, 2)) / num_pos
 
 
 def sigmoid_l1_loss(logits, target, offset=0.0, mask=None):

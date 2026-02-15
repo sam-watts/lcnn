@@ -13,6 +13,7 @@ from torch.utils.data import Dataset
 from torch.utils.data.dataloader import default_collate
 
 from lcnn.config import M
+from lcnn.utils import apply_gaussian_heatmap
 
 
 class WireframeDataset(Dataset):
@@ -34,6 +35,7 @@ class WireframeDataset(Dataset):
         self.n_stc_negl = M.n_stc_negl
         self.use_cood = M.use_cood
         self.use_slop = M.use_slop
+        self.jmap_gaussian_sigma = getattr(M, "jmap_gaussian_sigma", 0)
 
     def __len__(self):
         return len(self.filelist)
@@ -64,9 +66,20 @@ class WireframeDataset(Dataset):
         # For junc, lpos, and lneg that stores the junction coordinates, the last
         # dimension is (y, x, t), where t represents the type of that junction.
         with np.load(self.filelist[idx]) as npz:
+            jmap = npz["jmap"]
+            joff = npz["joff"]
+            lmap = npz["lmap"]
+
+            # Apply Gaussian heatmap to junction map if sigma > 0
+            if self.jmap_gaussian_sigma > 0:
+                jmap = apply_gaussian_heatmap(
+                    jmap, joff, sigma=self.jmap_gaussian_sigma
+                )
+
             target = {
-                name: torch.from_numpy(npz[name]).float()
-                for name in ["jmap", "joff", "lmap"]
+                "jmap": torch.from_numpy(jmap).float(),
+                "joff": torch.from_numpy(joff).float(),
+                "lmap": torch.from_numpy(lmap).float(),
             }
             lpos = np.random.permutation(npz["lpos"])[: self.n_stc_posl]
             lneg = np.random.permutation(npz["lneg"])[: self.n_stc_negl]
