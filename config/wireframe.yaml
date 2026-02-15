@@ -76,5 +76,9 @@ optim:
 
   # LR scheduler: "cosine_warmup" or "step" (original behavior)
   scheduler: cosine_warmup
-  warmup_epochs: 3
+  warmup_epochs: 5
   min_lr: 1.0e-6
+
+  # Early stopping: stop if val loss hasn't improved for this many epochs.
+  # Set to 0 to disable.
+  early_stopping_patience: 15
