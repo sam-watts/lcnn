@@ -58,6 +58,18 @@ model:
   use_slop: 0
   use_conv: 0
 
+  # Gaussian heatmap parameters
+  # sigma for the 2D Gaussian applied to junction heatmaps.
+  # Set to 0 to disable Gaussian heatmap (use binary heatmap).
+  # Typical values: 1.0-3.0 pixels at heatmap resolution (128x128).
+  jmap_gaussian_sigma: 1.5
+
+  # Loss function for junction heatmap: "cross_entropy" or "focal".
+  # "focal" uses CenterNet-style penalty-reduced focal loss, which is
+  # designed to work well with Gaussian heatmap targets.
+  # "cross_entropy" uses the original soft cross-entropy loss.
+  jmap_loss: cross_entropy
+
   # junction threashold for evaluation (See #5)
   eval_junc_thres: 0.008
 

@@ -30,7 +30,7 @@ from scipy.ndimage import zoom
 try:
     sys.path.append(".")
     sys.path.append("..")
-    from lcnn.utils import parmap
+    from lcnn.utils import parmap, gaussian_2d
 except Exception:
     raise
 
@@ -43,7 +43,17 @@ def to_int(x):
     return tuple(map(int, x))
 
 
-def save_heatmap(prefix, image, lines):
+def save_heatmap(prefix, image, lines, gaussian_sigma=0):
+    """Save heatmap labels for an image.
+
+    Args:
+        prefix: Output file prefix path.
+        image: Input image array.
+        lines: Line segments array of shape [N, 2, 2].
+        gaussian_sigma: Standard deviation for Gaussian junction heatmap.
+            If 0, a binary heatmap is used (original behavior).
+            If > 0, each junction gets a 2D Gaussian blob with this sigma.
+    """
     im_rescale = (512, 512)
     heatmap_scale = (128, 128)
 
@@ -74,8 +84,16 @@ def save_heatmap(prefix, image, lines):
         lpos.append([junc[jid(v0)], junc[jid(v1)]])
 
         vint0, vint1 = to_int(v0), to_int(v1)
-        jmap[0][vint0] = 1
-        jmap[0][vint1] = 1
+        if gaussian_sigma > 0:
+            # Gaussian heatmap: place a 2D Gaussian at each junction
+            g0 = gaussian_2d(heatmap_scale, (v0[0], v0[1]), sigma=gaussian_sigma)
+            g1 = gaussian_2d(heatmap_scale, (v1[0], v1[1]), sigma=gaussian_sigma)
+            jmap[0] = np.maximum(jmap[0], g0)
+            jmap[0] = np.maximum(jmap[0], g1)
+        else:
+            # Binary heatmap (original behavior)
+            jmap[0][vint0] = 1
+            jmap[0][vint1] = 1
         rr, cc, value = skimage.draw.line_aa(*to_int(v0), *to_int(v1))
         lmap[rr, cc] = np.maximum(lmap[rr, cc], value)
 
