@@ -274,21 +274,24 @@ class Trainer(object):
 
         def draw_vecl(lines, sline, juncs, junts, fn):
             imshow(img)
-            if len(lines) > 0 and not (lines[0] == 0).all():
-                for i, ((a, b), s) in enumerate(zip(lines, sline)):
-                    if i > 0 and (lines[i] == lines[0]).all():
-                        break
+            if len(lines) > 0:
+                # Deduplicate lines (handles both GT duplicates and
+                # model-output padding that wraps via modular indexing)
+                seen = set()
+                for (a, b), s in zip(lines, sline):
+                    key = (a[0], a[1], b[0], b[1])
+                    if key in seen:
+                        continue
+                    seen.add(key)
                     plt.plot([a[1], b[1]], [a[0], b[0]], c=c(s), linewidth=4)
-            if not (juncs[0] == 0).all():
-                for i, j in enumerate(juncs):
-                    if i > 0 and (i == juncs[0]).all():
-                        break
-                    plt.scatter(j[1], j[0], c="red", s=64, zorder=100)
-            if junts is not None and len(junts) > 0 and not (junts[0] == 0).all():
-                for i, j in enumerate(junts):
-                    if i > 0 and (i == junts[0]).all():
-                        break
-                    plt.scatter(j[1], j[0], c="blue", s=64, zorder=100)
+            if len(juncs) > 0:
+                juncs_unique = np.unique(juncs, axis=0)
+                plt.scatter(juncs_unique[:, 1], juncs_unique[:, 0],
+                            c="red", s=64, zorder=100)
+            if junts is not None and len(junts) > 0:
+                junts_unique = np.unique(junts, axis=0)
+                plt.scatter(junts_unique[:, 1], junts_unique[:, 0],
+                            c="blue", s=64, zorder=100)
             plt.savefig(fn)
             plt.close()
 
