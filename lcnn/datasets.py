@@ -7,6 +7,7 @@ import random
 
 import numpy as np
 import numpy.linalg as LA
+import skimage.draw
 import torch
 from scipy.ndimage import rotate as ndimage_rotate
 from skimage import io
@@ -115,8 +116,51 @@ class WireframeDataset(Dataset):
     def get_image_path(self, index):
         return self.filelist[index]["image"]
 
+    @staticmethod
+    def _regenerate_heatmaps(junc, lpos, hmap_h, hmap_w):
+        """Regenerate jmap, joff, lmap from junction/line coordinates.
+
+        This is used after geometric augmentations (rotation) to ensure
+        the pixel-level heatmaps are perfectly consistent with the
+        coordinate-level data.
+
+        Args:
+            junc:   [Na, 3]   junction coordinates (y, x, type)
+            lpos:   [N, 2, 3] positive line endpoints (y, x, type)
+            hmap_h: int       heatmap height (e.g. 128)
+            hmap_w: int       heatmap width  (e.g. 128)
+        Returns:
+            jmap [1, H, W], joff [1, 2, H, W], lmap [H, W]
+        """
+        jmap = np.zeros((1, hmap_h, hmap_w), dtype=np.float32)
+        joff = np.zeros((1, 2, hmap_h, hmap_w), dtype=np.float32)
+        lmap = np.zeros((hmap_h, hmap_w), dtype=np.float32)
+
+        # Fill junction heatmap and offset map
+        for v in junc:
+            iy, ix = int(v[0]), int(v[1])
+            if 0 <= iy < hmap_h and 0 <= ix < hmap_w:
+                jmap[0, iy, ix] = 1
+                joff[0, 0, iy, ix] = v[0] - iy - 0.5
+                joff[0, 1, iy, ix] = v[1] - ix - 0.5
+
+        # Fill line heatmap from positive lines
+        for line in lpos:
+            v0 = (int(round(line[0, 0])), int(round(line[0, 1])))
+            v1 = (int(round(line[1, 0])), int(round(line[1, 1])))
+            # Clamp to valid pixel range
+            v0 = (max(0, min(hmap_h - 1, v0[0])), max(0, min(hmap_w - 1, v0[1])))
+            v1 = (max(0, min(hmap_h - 1, v1[0])), max(0, min(hmap_w - 1, v1[1])))
+            rr, cc, value = skimage.draw.line_aa(v0[0], v0[1], v1[0], v1[1])
+            # Clamp indices (line_aa can sometimes produce boundary values)
+            mask = (rr >= 0) & (rr < hmap_h) & (cc >= 0) & (cc < hmap_w)
+            rr, cc, value = rr[mask], cc[mask], value[mask]
+            lmap[rr, cc] = np.maximum(lmap[rr, cc], value)
+
+        return jmap, joff, lmap
+
     def _augment(self, image, npz):
-        """Apply augmentations to image and label arrays in-place.
+        """Apply augmentations to image and label arrays.
 
         Args:
             image: [3, H, W] normalized image
@@ -186,26 +230,16 @@ class WireframeDataset(Dataset):
             cos_a = np.cos(rad)
             sin_a = np.sin(rad)
 
-            # Rotate spatial arrays
-            # scipy.ndimage.rotate rotates CCW for positive angles
+            # ---- Step 1: Rotate image pixels ----
             rot_kw = dict(reshape=False, order=1, mode="constant", cval=0)
-
             image = ndimage_rotate(image, angle, axes=(1, 2), **rot_kw)
-            jmap = ndimage_rotate(jmap, angle, axes=(1, 2), **rot_kw)
-            lmap = ndimage_rotate(lmap, angle, axes=(0, 1), **rot_kw)
 
-            # Rotate joff spatial maps, then rotate offset vectors
-            joff = ndimage_rotate(joff, angle, axes=(2, 3), **rot_kw)
-            dy_old = joff[:, 0].copy()
-            dx_old = joff[:, 1].copy()
-            joff[:, 0] = cos_a * dy_old - sin_a * dx_old
-            joff[:, 1] = sin_a * dy_old + cos_a * dx_old
-
-            # Rotate coordinate arrays about heatmap center
-            cy, cx = (hmap_w - 1) / 2.0, (hmap_w - 1) / 2.0
+            # ---- Step 2: Rotate all coordinate data ----
+            cy = (hmap_h - 1) / 2.0
+            cx = (hmap_w - 1) / 2.0
 
             def rotate_coords(coords):
-                """Rotate (y, x) columns in-place. coords shape: [..., 3] with (y, x, type)."""
+                """Rotate (y, x) columns in-place. coords shape: [..., >=2]."""
                 y = coords[..., 0] - cy
                 x = coords[..., 1] - cx
                 coords[..., 0] = cos_a * y - sin_a * x + cy
@@ -220,10 +254,9 @@ class WireframeDataset(Dataset):
                 lneg = lneg.copy()
                 rotate_coords(lneg)
 
-            # Remove out-of-bounds junctions, remap Lpos/Lneg indices
-            bound = hmap_w - 1
+            # ---- Step 3: Filter out-of-bounds junctions ----
             valid_mask = (
-                (junc[:, 0] >= 0) & (junc[:, 0] < hmap_w) &
+                (junc[:, 0] >= 0) & (junc[:, 0] < hmap_h) &
                 (junc[:, 1] >= 0) & (junc[:, 1] < hmap_w)
             )
             old_to_new = np.full(len(junc), -1, dtype=np.int64)
@@ -231,9 +264,10 @@ class WireframeDataset(Dataset):
             old_to_new[new_indices] = np.arange(len(new_indices))
             junc = junc[valid_mask]
 
+            # ---- Step 4: Remap Lpos/Lneg, keep only lines with both junctions valid ----
             def remap_lines(L):
                 if len(L) == 0:
-                    return L
+                    return L.copy()
                 new_L = old_to_new[L]
                 keep = (new_L[:, 0] >= 0) & (new_L[:, 1] >= 0)
                 return new_L[keep]
@@ -241,42 +275,28 @@ class WireframeDataset(Dataset):
             Lpos = remap_lines(Lpos)
             Lneg = remap_lines(Lneg)
 
-            # Clip lpos/lneg line endpoints to image boundary
-            def clip_lines(lines):
-                if lines.ndim != 3 or len(lines) == 0:
-                    return np.zeros((0, 2, 3), dtype=lines.dtype)
-                out = lines.copy()
-                keep = np.ones(len(out), dtype=bool)
-                for i in range(len(out)):
-                    result = _clip_segment(
-                        out[i, 0, 0], out[i, 0, 1],
-                        out[i, 1, 0], out[i, 1, 1], 0, bound)
-                    if result is None:
-                        keep[i] = False
-                    else:
-                        out[i, 0, 0], out[i, 0, 1] = result[0], result[1]
-                        out[i, 1, 0], out[i, 1, 1] = result[2], result[3]
-                return out[keep]
+            # ---- Step 5: Rebuild lpos/lneg from surviving junctions ----
+            # This keeps lpos/lneg perfectly consistent with Lpos/Lneg.
+            # Each lpos[i] = [junc[Lpos[i,0]], junc[Lpos[i,1]]]
+            if len(Lpos) > 0:
+                lpos = np.stack(
+                    [junc[Lpos[:, 0]], junc[Lpos[:, 1]]], axis=1
+                ).astype(np.float32)
+            else:
+                lpos = np.zeros((0, 2, 3), dtype=np.float32)
 
-            lpos = clip_lines(lpos)
-            lneg = clip_lines(lneg)
+            if len(Lneg) > 0:
+                lneg = np.stack(
+                    [junc[Lneg[:, 0]], junc[Lneg[:, 1]]], axis=1
+                ).astype(np.float32)
+            else:
+                lneg = np.zeros((0, 2, 3), dtype=np.float32)
 
-            # Add new junctions at clipped boundary endpoints so that
-            # every line endpoint has a corresponding junction dot.
-            boundary_juncs = []
-            for lines in [lpos, lneg]:
-                if len(lines) == 0:
-                    continue
-                for ei in [0, 1]:  # each endpoint
-                    pts = lines[:, ei, :]  # [N, 3] (y, x, type)
-                    on_edge = (
-                        (pts[:, 0] <= 0) | (pts[:, 0] >= bound) |
-                        (pts[:, 1] <= 0) | (pts[:, 1] >= bound)
-                    )
-                    if on_edge.any():
-                        boundary_juncs.append(pts[on_edge])
-            if boundary_juncs:
-                junc = np.concatenate([junc] + boundary_juncs, axis=0)
+            # ---- Step 6: Regenerate heatmaps from transformed coordinates ----
+            # This avoids interpolation artifacts from rotating pixel grids.
+            jmap, joff, lmap = self._regenerate_heatmaps(
+                junc, lpos, hmap_h, hmap_w
+            )
 
         return image, {
             "jmap": jmap, "joff": joff, "lmap": lmap,
