@@ -33,7 +33,7 @@ class Trainer(object):
         self.extra_val_loaders = extra_val_loaders or {}
         self.batch_size = C.model.batch_size
 
-        self.validation_interval = C.io.validation_interval
+        self.validation_interval = C.io.get("validation_interval", 1)
 
         self.out = out
         if not osp.exists(self.out):
@@ -118,7 +118,6 @@ class Trainer(object):
 
         total_loss = 0
         self.metrics[...] = 0
-        per_sample = []
         with torch.no_grad():
             for batch_idx, (image, meta, target) in enumerate(self.val_loader):
                 input_dict = {
@@ -138,20 +137,12 @@ class Trainer(object):
                         f"{npz}/{index:06}.npz",
                         **{k: v[i].cpu().numpy() for k, v in H.items()},
                     )
-                    per_sample.append(
-                        self._collect_sample_preds(
-                            H, i, self.val_loader.dataset, index
-                        )
-                    )
                     if index >= 5:
                         continue
                     self._plot_samples(i, index, H, meta, target, f"{viz}/{index:06}")
 
         label = f"validation{'' if extra_label is None else '-' + extra_label}"
         self._write_metrics(len(self.val_loader), total_loss, label, True)
-
-        sap = self._compute_sap(per_sample)
-        self._log_sap(sap, label)
 
         self.mean_loss = total_loss / len(self.val_loader)
 
@@ -344,12 +335,6 @@ class Trainer(object):
                     + f"| {4 * self.batch_size / (timer() - time):04.1f} "
                 )
                 time = timer()
-            num_images = self.batch_size * self.iteration
-            if num_images % self.validation_interval == 0 or num_images == 600:
-                self.validate()
-                time = timer()
-                if self._stop_training:
-                    return
 
     def _write_metrics(self, size, total_loss, prefix, do_print=False):
         log_data = {}
@@ -479,6 +464,8 @@ class Trainer(object):
             elif self.epoch == self.lr_decay_epoch:
                 self.optim.param_groups[0]["lr"] /= 10
             self.train_epoch()
+            if (self.epoch + 1) % self.validation_interval == 0:
+                self.validate()
             if self._stop_training:
                 pprint(f"Training stopped early at epoch {self.epoch}")
                 break
