@@ -3,7 +3,7 @@ io:
   resume_from:
   num_workers: 4
   tensorboard_port: 0
-  validation_interval: 2544
+  validation_interval: 1  # validate every N epochs
   run_name: gfrid_roofmapnet_rid2_v2
 
 model:
@@ -78,12 +78,12 @@ optim:
   #   cosine_warmup -- linear warmup then cosine decay (needs max_epoch tuned)
   #   plateau       -- ReduceLROnPlateau, adapts to val loss (good for exploration)
   #   step          -- single step decay at lr_decay_epoch
-  scheduler: cosine_warmup
-  warmup_epochs: 5
-  min_lr: 1.0e-6
+  scheduler: plateau
+  # warmup_epochs: 5
+  # min_lr: 1.0e-6
   # plateau-specific (used only when scheduler: plateau)
-  # plateau_factor: 0.5
-  # plateau_patience: 5
+  plateau_factor: 0.5
+  plateau_patience: 5
 
   # Early stopping: stop if val loss hasn't improved for this many epochs.
   # Set to 0 to disable.
