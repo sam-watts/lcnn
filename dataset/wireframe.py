@@ -30,9 +30,13 @@ from scipy.ndimage import zoom
 try:
     sys.path.append(".")
     sys.path.append("..")
-    from lcnn.utils import parmap
+    from lcnn.utils import parmap, draw_gaussian
 except Exception:
     raise
+
+# Default sigma for Gaussian junction heatmaps.
+# Set to 0 or None to use the original binary heatmaps.
+GAUSSIAN_SIGMA = 1.0
 
 
 def inrange(v, shape):
@@ -74,8 +78,12 @@ def save_heatmap(prefix, image, lines):
         lpos.append([junc[jid(v0)], junc[jid(v1)]])
 
         vint0, vint1 = to_int(v0), to_int(v1)
-        jmap[0][vint0] = 1
-        jmap[0][vint1] = 1
+        if GAUSSIAN_SIGMA and GAUSSIAN_SIGMA > 0:
+            draw_gaussian(jmap[0], vint0, sigma=GAUSSIAN_SIGMA)
+            draw_gaussian(jmap[0], vint1, sigma=GAUSSIAN_SIGMA)
+        else:
+            jmap[0][vint0] = 1
+            jmap[0][vint1] = 1
         rr, cc, value = skimage.draw.line_aa(*to_int(v0), *to_int(v1))
         lmap[rr, cc] = np.maximum(lmap[rr, cc], value)
 
