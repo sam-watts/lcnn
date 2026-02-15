@@ -4,10 +4,10 @@ io:
   num_workers: 4
   tensorboard_port: 0
   validation_interval: 24000
-  run_name: rid2_gfrid_roofmapnet_flips
+  run_name: gfrid_roof_centered_more_epochs
 
 model:
-  data_sources: [rid2, gfrid, roofmapnet]
+  data_sources: [gfrid_roof_centered]
   image:
       mean: [109.730, 103.832, 98.681]
       stddev: [22.275, 22.124, 23.229]
@@ -68,8 +68,13 @@ model:
 
 optim:
   name: Adam
-  lr: 4.0e-4
+  lr: 2.0e-4
   amsgrad: True
   weight_decay: 1.0e-4
-  max_epoch: 24
+  max_epoch: 120
   lr_decay_epoch: 10
+
+  # LR scheduler: "cosine_warmup" or "step" (original behavior)
+  scheduler: cosine_warmup
+  warmup_epochs: 3
+  min_lr: 1.0e-6

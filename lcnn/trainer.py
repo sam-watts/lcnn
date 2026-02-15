@@ -19,11 +19,13 @@ from lcnn.utils import recursive_to
 
 
 class Trainer(object):
-    def __init__(self, device, model, optimizer, train_loader, val_loader, out):
+    def __init__(self, device, model, optimizer, train_loader, val_loader, out,
+                 scheduler=None):
         self.device = device
 
         self.model = model
         self.optim = optimizer
+        self.scheduler = scheduler
 
         self.train_loader = train_loader
         self.val_loader = val_loader
@@ -235,6 +237,7 @@ class Trainer(object):
                     print(csv_str, file=fout)
                 pprint(prt_str, " " * 7)
         log_data[f"{prefix}/total_loss"] = total_loss / size
+        log_data["lr"] = self.optim.param_groups[0]["lr"]
         if self.wandb_run is not None:
             wandb.log(log_data, step=self.iteration)
         return total_loss
@@ -336,9 +339,14 @@ class Trainer(object):
         epoch_size = len(self.train_loader)
         start_epoch = self.iteration // epoch_size
         for self.epoch in range(start_epoch, self.max_epoch):
-            if self.epoch == self.lr_decay_epoch:
+            current_lr = self.optim.param_groups[0]["lr"]
+            if self.scheduler is not None:
+                pprint(f"Epoch {self.epoch}: lr = {current_lr:.2e}")
+            elif self.epoch == self.lr_decay_epoch:
                 self.optim.param_groups[0]["lr"] /= 10
             self.train_epoch()
+            if self.scheduler is not None:
+                self.scheduler.step()
 
 
 cmap = plt.get_cmap("jet")

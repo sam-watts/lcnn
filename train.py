@@ -14,6 +14,7 @@ Options:
 
 import datetime
 import glob
+import math
 import os
 import os.path as osp
 import platform
@@ -44,6 +45,51 @@ def git_hash():
     if isinstance(ret, bytes):
         ret = ret.decode()
     return ret
+
+
+def create_scheduler(optimizer, config, last_epoch=-1):
+    """Create LR scheduler based on config.
+
+    Supports:
+      - "cosine_warmup": linear warmup for `warmup_epochs`, then cosine decay
+        to `min_lr` over the remaining epochs.
+      - "step": original L-CNN behaviour -- divide LR by 10 at `lr_decay_epoch`.
+    """
+    scheduler_name = config.optim.get("scheduler", "step")
+
+    if scheduler_name == "cosine_warmup":
+        warmup_epochs = config.optim.get("warmup_epochs", 3)
+        max_epochs = config.optim.max_epoch
+        min_lr = config.optim.get("min_lr", 1e-6)
+        base_lr = config.optim.lr
+        min_lr_ratio = min_lr / base_lr
+
+        def lr_lambda(epoch):
+            if epoch < warmup_epochs:
+                # Linear warmup from min_lr to base_lr
+                return min_lr_ratio + (1 - min_lr_ratio) * epoch / max(1, warmup_epochs)
+            # Cosine annealing from base_lr to min_lr
+            progress = (epoch - warmup_epochs) / max(1, max_epochs - warmup_epochs)
+            return min_lr_ratio + (1 - min_lr_ratio) * 0.5 * (
+                1 + math.cos(math.pi * progress)
+            )
+
+        return torch.optim.lr_scheduler.LambdaLR(
+            optimizer, lr_lambda, last_epoch=last_epoch
+        )
+
+    elif scheduler_name == "step":
+        # Reproduce the original single-step decay
+        return torch.optim.lr_scheduler.MultiStepLR(
+            optimizer,
+            milestones=[config.optim.lr_decay_epoch],
+            gamma=0.1,
+            last_epoch=last_epoch,
+        )
+
+    else:
+        # No scheduler -- manual / no decay
+        return None
 
 
 def get_outdir():
@@ -154,7 +200,18 @@ def main():
 
     if resume_from:
         optim.load_state_dict(checkpoint["optim_state_dict"])
-    outdir = resume_from or get_outdir(M.run_name)
+
+    # 4. lr scheduler
+    if resume_from:
+        resume_epoch = checkpoint["iteration"] // epoch_size
+        scheduler = create_scheduler(optim, C, last_epoch=resume_epoch - 1)
+        print(f"Resumed scheduler at epoch {resume_epoch}, "
+              f"lr = {optim.param_groups[0]['lr']:.2e}")
+    else:
+        scheduler = create_scheduler(optim, C)
+    if scheduler is not None:
+        print(f"Using scheduler: {C.optim.get('scheduler', 'step')}")
+    outdir = resume_from or get_outdir()
     print("outdir:", outdir)
 
     try:
@@ -165,6 +222,7 @@ def main():
             train_loader=train_loader,
             val_loader=val_loader,
             out=outdir,
+            scheduler=scheduler,
         )
         if resume_from:
             trainer.iteration = checkpoint["iteration"]
