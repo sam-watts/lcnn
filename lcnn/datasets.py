@@ -13,6 +13,7 @@ from torch.utils.data import Dataset
 from torch.utils.data.dataloader import default_collate
 
 from lcnn.config import M
+from lcnn.utils import generate_gaussian_jmap
 
 
 class WireframeDataset(Dataset):
@@ -34,6 +35,10 @@ class WireframeDataset(Dataset):
         self.n_stc_negl = M.n_stc_negl
         self.use_cood = M.use_cood
         self.use_slop = M.use_slop
+
+        # Gaussian heatmap parameters
+        self.gaussian_sigma = getattr(M, "gaussian_sigma", 0.0)
+        self.use_gaussian_heatmap = self.gaussian_sigma is not None and self.gaussian_sigma > 0
 
     def __len__(self):
         return len(self.filelist)
@@ -68,6 +73,24 @@ class WireframeDataset(Dataset):
                 name: torch.from_numpy(npz[name]).float()
                 for name in ["jmap", "joff", "lmap"]
             }
+
+            # Apply Gaussian heatmap to junction map at runtime if configured.
+            # This allows using Gaussian heatmaps with existing preprocessed
+            # data (binary jmap) without re-running the preprocessing script.
+            if self.use_gaussian_heatmap:
+                junc = npz["junc"]  # [Na, 3] with (y, x, t)
+                jmap_np = target["jmap"].numpy()
+                n_jtyp = jmap_np.shape[0]
+                for j in range(n_jtyp):
+                    # Get junctions of this type
+                    jtype_mask = junc[:, 2] == j if junc.shape[1] > 2 else np.ones(len(junc), dtype=bool)
+                    junctions_j = junc[jtype_mask, :2]  # (y, x) coordinates
+                    heatmap_shape = jmap_np.shape[1:]  # (H, W)
+                    jmap_np[j] = generate_gaussian_jmap(
+                        heatmap_shape, junctions_j, sigma=self.gaussian_sigma
+                    )
+                target["jmap"] = torch.from_numpy(jmap_np).float()
+
             lpos = np.random.permutation(npz["lpos"])[: self.n_stc_posl]
             lneg = np.random.permutation(npz["lneg"])[: self.n_stc_negl]
             npos, nneg = len(lpos), len(lneg)

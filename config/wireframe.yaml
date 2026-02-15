@@ -58,6 +58,13 @@ model:
   use_slop: 0
   use_conv: 0
 
+  # Gaussian heatmap sigma for junction detection.
+  # When > 0, junction heatmaps use 2D Gaussian distributions instead of
+  # binary (0/1) targets. This provides smoother supervision and better
+  # gradient flow. Set to 0 to use the original binary heatmaps.
+  # Recommended values: 0.5-2.0 for 128x128 heatmaps.
+  gaussian_sigma: 1.0
+
   # junction threashold for evaluation (See #5)
   eval_junc_thres: 0.008
 
