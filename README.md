@@ -85,7 +85,7 @@ conda create -y -n lcnn
 source activate lcnn
 # Modify the command with your CUDA version: https://pytorch.org/
 conda install -y pytorch cudatoolkit=10.1 -c pytorch
-conda install -y tensorboardx -c conda-forge
+conda install -y wandb -c conda-forge
 conda install -y pyyaml docopt matplotlib scikit-image opencv
 mkdir data logs post
 ```
