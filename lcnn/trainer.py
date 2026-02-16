@@ -51,7 +51,10 @@ class Trainer(object):
         self.best_verification_loss = 1e1000
 
         self.early_stopping_patience = C.optim.get("early_stopping_patience", 0)
+        self.early_stopping_metric = C.optim.get("early_stopping_metric", "")
         self._best_loss_epoch = 0
+        self._best_watched_loss = 1e1000
+        self._last_watched_loss = 1e1000
         self._stop_training = False
 
         self.loss_labels = None
@@ -146,9 +149,7 @@ class Trainer(object):
 
         self.mean_loss = total_loss / len(self.val_loader)
 
-        # Compute verification loss (lpos + lneg) for checkpointing.
-        # These are the losses most directly correlated with SAP metrics,
-        # and are less noisy than the total loss (which is dominated by jmap).
+        # Compute verification loss (lpos + lneg) for logging.
         verification_loss = 0
         for name in ["lpos", "lneg"]:
             if name in self.loss_labels:
@@ -160,6 +161,29 @@ class Trainer(object):
                 step=self.iteration,
             )
 
+        # Run extra validations (e.g. always validate on gfrid_roof_centered)
+        # before checkpoint/early-stopping decisions so we can watch their loss.
+        extra_losses = {}
+        for name, loader in self.extra_val_loaders.items():
+            extra_losses[name] = self._validate_extra(loader, name)
+
+        # Determine which loss to watch for checkpointing and early stopping.
+        # If early_stopping_metric names an extra validation set, use its
+        # total loss.  Otherwise fall back to verification loss on the main set.
+        watched_metric = self.early_stopping_metric
+        if watched_metric and watched_metric in extra_losses:
+            watched_loss = extra_losses[watched_metric]
+            watched_label = f"validation-{watched_metric}/total_loss"
+        else:
+            watched_loss = verification_loss
+            watched_label = "validation/verification_loss"
+
+        self._last_watched_loss = watched_loss
+        if self.wandb_run is not None:
+            wandb.log({"watched_loss": watched_loss}, step=self.iteration)
+        pprint(f"  Watched metric ({watched_label}): {watched_loss:.4f}"
+               f"  (best: {self._best_watched_loss:.4f})")
+
         torch.save(
             {
                 "iteration": self.iteration,
@@ -168,6 +192,8 @@ class Trainer(object):
                 "model_state_dict": self.model.state_dict(),
                 "best_mean_loss": self.best_mean_loss,
                 "best_verification_loss": self.best_verification_loss,
+                "best_watched_loss": self._best_watched_loss,
+                "best_loss_epoch": self._best_loss_epoch,
             },
             osp.join(self.out, "checkpoint_latest.pth"),
         )
@@ -175,8 +201,10 @@ class Trainer(object):
             osp.join(self.out, "checkpoint_latest.pth"),
             osp.join(npz, "checkpoint.pth"),
         )
-        if verification_loss < self.best_verification_loss:
-            self.best_verification_loss = verification_loss
+        if watched_loss < self._best_watched_loss:
+            self._best_watched_loss = watched_loss
+            self._best_loss_epoch = self.epoch
+            pprint(f"  New best! Saving checkpoint_best.pth")
             shutil.copy(
                 osp.join(self.out, "checkpoint_latest.pth"),
                 osp.join(self.out, "checkpoint_best.pth"),
@@ -187,16 +215,12 @@ class Trainer(object):
                 and self.epoch - self._best_loss_epoch >= self.early_stopping_patience):
             epochs_since = self.epoch - self._best_loss_epoch
             pprint(
-                f"Early stopping: no val loss improvement for "
+                f"Early stopping: no improvement in {watched_label} for "
                 f"{epochs_since} epochs (best at epoch {self._best_loss_epoch})"
             )
             self._stop_training = True
             if self.wandb_run is not None:
                 wandb.log({"early_stopped_epoch": self.epoch}, step=self.iteration)
-
-        # Run extra validations (e.g. always validate on gfrid_roof_centered)
-        for name, loader in self.extra_val_loaders.items():
-            self._validate_extra(loader, name)
 
         if training:
             self.model.train()
@@ -267,7 +291,10 @@ class Trainer(object):
             )
 
     def _validate_extra(self, loader, label):
-        """Run validation on an additional dataset (no checkpoint save)."""
+        """Run validation on an additional dataset.
+
+        Returns the mean total loss for this dataset.
+        """
         tprint(f"Running extra validation ({label})...", " " * 75)
 
         total_loss = 0
@@ -297,6 +324,8 @@ class Trainer(object):
 
         sap = self._compute_sap(per_sample)
         self._log_sap(sap, prefix)
+
+        return total_loss / len(loader)
 
     def train_epoch(self):
         self.model.train()
@@ -474,7 +503,9 @@ class Trainer(object):
                     self.scheduler,
                     torch.optim.lr_scheduler.ReduceLROnPlateau,
                 ):
-                    self.scheduler.step(self.mean_loss)
+                    self.scheduler.step(self._last_watched_loss
+                                        if self._last_watched_loss < 1e100
+                                        else self.mean_loss)
                 else:
                     self.scheduler.step()
 

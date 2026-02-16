@@ -252,7 +252,10 @@ def main():
         )
 
     if resume_from:
-        checkpoint = torch.load(osp.join(resume_from, "checkpoint_latest.pth"))
+        ckpt_name = "checkpoint_best.pth" if C.io.get("resume_from_best") else "checkpoint_latest.pth"
+        ckpt_path = osp.join(resume_from, ckpt_name)
+        print(f"Resuming from: {ckpt_path}")
+        checkpoint = torch.load(ckpt_path)
 
     # 2. model
     if M.backbone == "stacked_hourglass":
@@ -294,21 +297,40 @@ def main():
     if resume_from:
         optim.load_state_dict(checkpoint["optim_state_dict"])
 
+    # Override LR if requested (useful for warm-restart from a checkpoint
+    # that had already decayed its LR).
+    if resume_from and C.optim.get("reset_lr_on_resume"):
+        new_lr = C.optim.lr
+        for pg in optim.param_groups:
+            pg["lr"] = new_lr
+        print(f"Reset LR to {new_lr:.2e} (reset_lr_on_resume=true)")
+
     # 4. lr scheduler
     if resume_from:
         resume_epoch = checkpoint["iteration"] // epoch_size
-        scheduler = create_scheduler(optim, C, last_epoch=resume_epoch - 1)
-        # Restore scheduler internal state (essential for ReduceLROnPlateau
-        # which cannot reconstruct its state from last_epoch alone).
-        if scheduler is not None and "scheduler_state_dict" in checkpoint:
-            scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
-        print(f"Resumed scheduler at epoch {resume_epoch}, "
-              f"lr = {optim.param_groups[0]['lr']:.2e}")
+        if C.optim.get("reset_lr_on_resume"):
+            # Fresh scheduler -- don't restore old state
+            scheduler = create_scheduler(optim, C)
+            print(f"Fresh scheduler from epoch {resume_epoch}, "
+                  f"lr = {optim.param_groups[0]['lr']:.2e}")
+        else:
+            scheduler = create_scheduler(optim, C, last_epoch=resume_epoch - 1)
+            # Restore scheduler internal state (essential for ReduceLROnPlateau
+            # which cannot reconstruct its state from last_epoch alone).
+            if scheduler is not None and "scheduler_state_dict" in checkpoint:
+                scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+            print(f"Resumed scheduler at epoch {resume_epoch}, "
+                  f"lr = {optim.param_groups[0]['lr']:.2e}")
     else:
         scheduler = create_scheduler(optim, C)
     if scheduler is not None:
         print(f"Using scheduler: {C.optim.get('scheduler', 'step')}")
-    outdir = resume_from or get_outdir()
+    # When doing a warm restart (reset_lr_on_resume), create a fresh output
+    # directory so the new run gets its own logs, checkpoints, and wandb run.
+    if resume_from and C.optim.get("reset_lr_on_resume"):
+        outdir = get_outdir()
+    else:
+        outdir = resume_from or get_outdir()
     print("outdir:", outdir)
 
     try:
@@ -330,6 +352,10 @@ def main():
             trainer.best_mean_loss = checkpoint["best_mean_loss"]
             if "best_verification_loss" in checkpoint:
                 trainer.best_verification_loss = checkpoint["best_verification_loss"]
+            if "best_watched_loss" in checkpoint:
+                trainer._best_watched_loss = checkpoint["best_watched_loss"]
+            if "best_loss_epoch" in checkpoint:
+                trainer._best_loss_epoch = checkpoint["best_loss_epoch"]
             del checkpoint
         trainer.train()
     except BaseException:
